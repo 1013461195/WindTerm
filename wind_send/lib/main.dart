@@ -1,8 +1,13 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'core_bridge/rust_core.dart';
+import 'features/session/session_editor.dart';
+import 'features/terminal/terminal_painter.dart';
+import 'features/terminal/terminal_input.dart';
 
 void main() {
   runApp(const WindSendApp());
@@ -38,49 +43,92 @@ class ShellWorkspace extends StatefulWidget {
 
 class _ShellWorkspaceState extends State<ShellWorkspace> {
   final RustCore _core = RustCore.load();
-  final List<String> _lines = <String>[];
-  Timer? _timer;
-  int? _sessionId;
+  SshSession? _currentSession;
+  TerminalSnapshot? _snapshot;
+  Timer? _pollTimer;
+  late final TerminalInputHandler _inputHandler;
+  final _focusNode = FocusNode();
 
   @override
   void initState() {
     super.initState();
-    _startMockSession();
+    _inputHandler = TerminalInputHandler(onInput: _handleInput);
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _pollTimer?.cancel();
+    _currentSession?.close();
+    _focusNode.dispose();
     super.dispose();
   }
 
-  void _startMockSession() {
-    final int sessionId = _core.openMockSession(cols: 120, rows: 36);
-    _sessionId = sessionId;
-    _lines
-      ..clear()
-      ..add('WindSend phase 0')
-      ..add('Core: ${_core.version}')
-      ..add('Session #$sessionId opened')
-      ..add('');
+  void _handleInput(Uint8List data) {
+    if (_currentSession != null) {
+      _currentSession!.writeBytes(data);
+    }
+  }
 
-    _timer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      final int? id = _sessionId;
-      if (id == null) {
-        return;
-      }
+  void _openSessionEditor() {
+    showDialog(
+      context: context,
+      builder: (context) => SessionEditor(
+        onConnect: (config) {
+          Navigator.of(context).pop();
+          _connect(config);
+        },
+      ),
+    );
+  }
 
-      final CoreEvent? event = _core.pollEvent(id);
-      if (event == null) {
-        return;
-      }
+  void _connect(SshConfig config) {
+    try {
+      final session = _core.openSession(
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+      );
 
       setState(() {
-        _lines.add(event.line);
-        if (_lines.length > 200) {
-          _lines.removeRange(0, _lines.length - 200);
-        }
+        _currentSession = session;
       });
+
+      // 启动轮询
+      _startPolling();
+
+      // 获取焦点以便接收键盘输入
+      _focusNode.requestFocus();
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('连接失败: $e'),
+          backgroundColor: Colors.redAccent,
+        ),
+      );
+    }
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+      if (_currentSession == null) return;
+
+      final snapshot = _currentSession!.readOutput();
+      if (snapshot != null) {
+        setState(() {
+          _snapshot = snapshot;
+        });
+      }
+    });
+  }
+
+  void _disconnect() {
+    _pollTimer?.cancel();
+    _currentSession?.close();
+    setState(() {
+      _currentSession = null;
+      _snapshot = null;
     });
   }
 
@@ -89,15 +137,26 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     return Scaffold(
       body: Row(
         children: <Widget>[
-          const _SessionRail(),
+          _SessionRail(
+            currentSession: _currentSession,
+            onNewSession: _openSessionEditor,
+            onDisconnect: _disconnect,
+          ),
           Expanded(
             child: Column(
               children: <Widget>[
-                const _TopBar(),
+                _TopBar(
+                  core: _core,
+                  session: _currentSession,
+                ),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                    child: TerminalSurface(lines: _lines),
+                    child: KeyboardListener(
+                      focusNode: _focusNode,
+                      onKeyEvent: _inputHandler.handleKeyEvent,
+                      child: TerminalView(snapshot: _snapshot),
+                    ),
                   ),
                 ),
               ],
@@ -110,7 +169,15 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
 }
 
 class _SessionRail extends StatelessWidget {
-  const _SessionRail();
+  final SshSession? currentSession;
+  final VoidCallback onNewSession;
+  final VoidCallback onDisconnect;
+
+  const _SessionRail({
+    this.currentSession,
+    required this.onNewSession,
+    required this.onDisconnect,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -132,22 +199,45 @@ class _SessionRail extends StatelessWidget {
               ),
             ),
             _NavItem(
-              icon: Icons.terminal_rounded,
-              label: 'Phase 0 mock core',
-              selected: true,
+              icon: Icons.add_rounded,
+              label: '新建连接',
+              selected: false,
+              onTap: onNewSession,
             ),
+            if (currentSession != null) ...[
+              const Divider(color: Color(0xff2a303b), height: 28),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                child: Text(
+                  '当前会话',
+                  style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
+                ),
+              ),
+              _NavItem(
+                icon: Icons.terminal_rounded,
+                label: 'SSH Session #${currentSession!.id}',
+                selected: true,
+                onTap: () {},
+              ),
+              _NavItem(
+                icon: Icons.close_rounded,
+                label: '断开连接',
+                selected: false,
+                onTap: onDisconnect,
+              ),
+            ],
             const Divider(color: Color(0xff2a303b), height: 28),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 18),
               child: Text(
-                'Milestone',
+                'Phase 1 - SSH MVP',
                 style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
               ),
             ),
             const Padding(
               padding: EdgeInsets.fromLTRB(18, 8, 18, 0),
               child: Text(
-                'Flutter UI -> Rust FFI -> mock terminal events',
+                'Rust SSH → VTE Terminal → Flutter',
                 style: TextStyle(color: Color(0xffc4cad4), height: 1.35),
               ),
             ),
@@ -163,41 +253,49 @@ class _NavItem extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.selected,
+    required this.onTap,
   });
 
   final IconData icon;
   final String label;
   final bool selected;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      height: 42,
-      margin: const EdgeInsets.symmetric(horizontal: 10),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: selected ? const Color(0xff263247) : Colors.transparent,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Row(
-        children: <Widget>[
-          Icon(icon, size: 18, color: const Color(0xff8fb6ff)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontWeight: FontWeight.w600),
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        height: 42,
+        margin: const EdgeInsets.symmetric(horizontal: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xff263247) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(icon, size: 18, color: const Color(0xff8fb6ff)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
 class _TopBar extends StatelessWidget {
-  const _TopBar();
+  final RustCore core;
+  final SshSession? session;
+
+  const _TopBar({required this.core, this.session});
 
   @override
   Widget build(BuildContext context) {
@@ -208,9 +306,9 @@ class _TopBar extends StatelessWidget {
         children: <Widget>[
           const Icon(Icons.memory_rounded, size: 18, color: Color(0xff8fb6ff)),
           const SizedBox(width: 10),
-          const Text(
-            'Rust core bridge',
-            style: TextStyle(fontWeight: FontWeight.w700),
+          Text(
+            session != null ? 'SSH Session #${session!.id}' : 'Rust core bridge',
+            style: const TextStyle(fontWeight: FontWeight.w700),
           ),
           const Spacer(),
           Container(
@@ -221,84 +319,13 @@ class _TopBar extends StatelessWidget {
               border: Border.all(color: const Color(0xff3a4657)),
               borderRadius: BorderRadius.circular(6),
             ),
-            child: const Text(
-              'M0',
-              style: TextStyle(color: Color(0xffaeb8c8), fontSize: 12),
+            child: Text(
+              session != null ? session!.getState() : 'disconnected',
+              style: const TextStyle(color: Color(0xffaeb8c8), fontSize: 12),
             ),
           ),
         ],
       ),
     );
-  }
-}
-
-class TerminalSurface extends StatelessWidget {
-  const TerminalSurface({super.key, required this.lines});
-
-  final List<String> lines;
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: const Color(0xff05070a),
-        border: Border.all(color: const Color(0xff2a303b)),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(6),
-        child: CustomPaint(
-          painter: TerminalPainter(lines),
-          child: const SizedBox.expand(),
-        ),
-      ),
-    );
-  }
-}
-
-class TerminalPainter extends CustomPainter {
-  TerminalPainter(this.lines);
-
-  final List<String> lines;
-
-  static const double _lineHeight = 20;
-  static const double _leftPadding = 14;
-  static const double _topPadding = 12;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final Paint background = Paint()..color = const Color(0xff05070a);
-    canvas.drawRect(Offset.zero & size, background);
-
-    final int visibleRows = ((size.height - _topPadding * 2) / _lineHeight)
-        .floor()
-        .clamp(0, lines.length);
-    final int firstLine = (lines.length - visibleRows).clamp(0, lines.length);
-    final TextPainter textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.left,
-    );
-
-    for (int i = firstLine; i < lines.length; i++) {
-      final double y = _topPadding + (i - firstLine) * _lineHeight;
-      textPainter.text = TextSpan(
-        text: lines[i],
-        style: const TextStyle(
-          color: Color(0xffd7e0ee),
-          fontFamily: 'Menlo',
-          fontFamilyFallback: <String>['Consolas', 'monospace'],
-          fontSize: 13,
-          height: 1.25,
-          letterSpacing: 0,
-        ),
-      );
-      textPainter.layout(maxWidth: size.width - _leftPadding * 2);
-      textPainter.paint(canvas, Offset(_leftPadding, y));
-    }
-  }
-
-  @override
-  bool shouldRepaint(TerminalPainter oldDelegate) {
-    return true;
   }
 }

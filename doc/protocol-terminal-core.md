@@ -71,6 +71,103 @@ stateDiagram-v2
 - 服务端拒绝。
 - 方法不支持。
 
+### 密钥协商策略
+
+SSH 握手阶段客户端与服务端协商四类算法，按优先级排列。
+
+#### KEX（密钥交换）
+
+优先使用 ECDH 和 Curve25519，保留 DH Group Exchange 作为兼容回退：
+
+| 优先级 | 算法 | 说明 |
+| --- | --- | --- |
+| 1 | curve25519-sha256 | 默认首选，无需协商 group，抗时序攻击。 |
+| 2 | curve25519-sha256@libssh.org | 旧版 OpenSSH 兼容。 |
+| 3 | ecdh-sha2-nistp256 | 广泛支持，NIST P-256。 |
+| 4 | ecdh-sha2-nistp384 | NIST P-384。 |
+| 5 | ecdh-sha2-nistp521 | NIST P-521。 |
+| 6 | diffie-hellman-group16-sha512 | 4096-bit DH，兼容不支持 ECDH 的旧服务端。 |
+| 7 | diffie-hellman-group14-sha256 | 2048-bit DH，最低兼容线。 |
+
+禁用：
+
+- `diffie-hellman-group1-sha1`（1024-bit，SHA-1）。
+- `diffie-hellman-group-exchange-sha1`（SHA-1）。
+- 所有基于 SHA-1 的 KEX。
+
+#### Host Key 算法
+
+优先 Ed25519，RSA 使用 SHA-2 签名：
+
+| 优先级 | 算法 | 说明 |
+| --- | --- | --- |
+| 1 | ssh-ed25519 | 默认首选，签名小，验证快。 |
+| 2 | ecdsa-sha2-nistp256 | 广泛部署。 |
+| 3 | ecdsa-sha2-nistp384 | 次选 ECDSA。 |
+| 4 | ecdsa-sha2-nistp521 | 次选 ECDSA。 |
+| 5 | rsa-sha2-512 | RSA 使用 SHA-512 签名。 |
+| 6 | rsa-sha2-256 | RSA 使用 SHA-256 签名。 |
+
+禁用：
+
+- `ssh-dss`（DSA，1024-bit 上限，SHA-1）。
+- `ssh-rsa`（SHA-1 签名）。
+
+#### 对称加密（Cipher）
+
+优先 AEAD 模式，避免 CBC：
+
+| 优先级 | 算法 | 模式 | 说明 |
+| --- | --- | --- | --- |
+| 1 | chacha20-poly1305@openssh.com | AEAD | 软件实现性能优秀，无 padding oracle 风险。 |
+| 2 | aes256-gcm@openssh.com | AEAD | 硬件 AES-NI 加速。 |
+| 3 | aes128-gcm@openssh.com | AEAD | 同上，密钥较短。 |
+| 4 | aes256-ctr | CTR | 兼容回退，无 AEAD 需配合 HMAC。 |
+| 5 | aes192-ctr | CTR | 同上。 |
+| 6 | aes128-ctr | CTR | 同上。 |
+
+禁用：
+
+- 所有 CBC 模式（`aes256-cbc`、`aes128-cbc` 等）。
+- 所有 RC4（`arcfour`）。
+- 所有 3DES（`3des-cbc`）。
+- `none` cipher。
+
+#### MAC（消息认证码）
+
+AEAD cipher 不需要 MAC；CTR/CBC cipher 必须配合 MAC：
+
+| 优先级 | 算法 | 说明 |
+| --- | --- | --- |
+| 1 | hmac-sha2-256-etm@openssh.com | ETM 模式，先加密后 MAC。 |
+| 2 | hmac-sha2-512-etm@openssh.com | ETM 模式。 |
+| 3 | hmac-sha2-256 | Encrypt-then-MAC 不可用时的回退。 |
+| 4 | hmac-sha2-512 | 同上。 |
+
+禁用：
+
+- `hmac-sha1`、`hmac-sha1-96`（SHA-1）。
+- `hmac-md5`、`hmac-md5-96`（MD5）。
+- 所有 `*-96` 截断变体。
+- `umac-64@openssh.com`（64-bit tag 太短）。
+
+#### 压缩
+
+默认禁用压缩，除非用户明确开启：
+
+| 策略 | 说明 |
+| --- | --- |
+| 默认 | `none`。终端流量小，压缩收益低，且增加时序侧信道风险。 |
+| 用户开启 | `zlib@openssh.com`（OpenSSH 专有延迟压缩）。 |
+| 禁用 | `zlib`（RFC 4253，全程压缩，安全风险更高）。 |
+
+#### 算法降级与用户覆盖
+
+- 默认策略硬编码在 Rust core 中，不暴露为用户 UI 配置。
+- 高级用户可通过 profile 的 `kex_override` 字段覆盖算法列表，用于兼容特殊服务端。
+- 连接日志记录协商结果：最终选定的 KEX、host key、cipher、MAC、compression 算法。
+- 如果服务端仅提供被禁用的算法，连接失败并提示具体原因（如"服务端仅支持 SHA-1 KEX，已被安全策略禁用"），不自动降级。
+
 ### known_hosts
 
 状态：

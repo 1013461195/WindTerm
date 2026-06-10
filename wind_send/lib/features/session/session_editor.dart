@@ -20,11 +20,7 @@ class SessionEditor extends StatefulWidget {
   final SshConfig? initialConfig;
   final void Function(SshConfig config) onConnect;
 
-  const SessionEditor({
-    super.key,
-    this.initialConfig,
-    required this.onConnect,
-  });
+  const SessionEditor({super.key, this.initialConfig, required this.onConnect});
 
   @override
   State<SessionEditor> createState() => _SessionEditorState();
@@ -94,7 +90,8 @@ class _SessionEditorState extends State<SessionEditor> {
                 controller: _hostController,
                 label: '主机',
                 hint: '例如: 192.168.1.100 或 example.com',
-                validator: (v) => (v == null || v.trim().isEmpty) ? '请输入主机地址' : null,
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? '请输入主机地址' : null,
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -115,7 +112,8 @@ class _SessionEditorState extends State<SessionEditor> {
                 controller: _usernameController,
                 label: '用户名',
                 hint: '例如: root',
-                validator: (v) => (v == null || v.trim().isEmpty) ? '请输入用户名' : null,
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? '请输入用户名' : null,
               ),
               const SizedBox(height: 16),
               _buildTextField(
@@ -141,7 +139,10 @@ class _SessionEditorState extends State<SessionEditor> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xff2f6fed),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 24,
+                        vertical: 12,
+                      ),
                     ),
                     child: const Text('连接'),
                   ),

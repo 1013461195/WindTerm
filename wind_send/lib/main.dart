@@ -1,9 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
@@ -16,33 +14,52 @@ import 'features/terminal/terminal_input.dart';
 
 // ── FFI 类型签名（与 rust_core.dart 保持一致） ──
 
-typedef _SessionOpenNative = Uint64 Function(
-  Pointer<Utf8Char> host, Uint16 port,
-  Pointer<Utf8Char> username, Pointer<Utf8Char> password,
-);
-typedef _SessionOpenDart = int Function(
-  Pointer<Utf8Char> host, int port,
-  Pointer<Utf8Char> username, Pointer<Utf8Char> password,
-);
+typedef _SessionOpenNative =
+    Uint64 Function(
+      Pointer<Utf8Char> host,
+      Uint16 port,
+      Pointer<Utf8Char> username,
+      Pointer<Utf8Char> password,
+    );
+typedef _SessionOpenDart =
+    int Function(
+      Pointer<Utf8Char> host,
+      int port,
+      Pointer<Utf8Char> username,
+      Pointer<Utf8Char> password,
+    );
 
 typedef _StringFreeNative = Void Function(Pointer<Utf8Char>);
 typedef _StringFreeDart = void Function(Pointer<Utf8Char>);
 
 /// 在后台 Isolate 中执行阻塞的 SSH 连接
 Future<int> _openSessionIsolate(
-  List<String> libCandidates, String host, int port,
-  String username, String password,
+  List<String> libCandidates,
+  String host,
+  int port,
+  String username,
+  String password,
 ) {
   return Isolate.run(() {
     // 每个 Isolate 需要自行打开动态库
     DynamicLibrary? lib;
     for (final path in libCandidates) {
-      try { lib = DynamicLibrary.open(path); break; } on Object { continue; }
+      try {
+        lib = DynamicLibrary.open(path);
+        break;
+      } on Object {
+        continue;
+      }
     }
     if (lib == null) return 0;
 
-    final sessionOpen = lib.lookupFunction<_SessionOpenNative, _SessionOpenDart>('core_session_open');
-    final stringFree  = lib.lookupFunction<_StringFreeNative,  _StringFreeDart>('core_string_free');
+    final sessionOpen = lib
+        .lookupFunction<_SessionOpenNative, _SessionOpenDart>(
+          'core_session_open',
+        );
+    final stringFree = lib.lookupFunction<_StringFreeNative, _StringFreeDart>(
+      'core_string_free',
+    );
 
     Pointer<Utf8Char> toUtf8(String s) {
       final units = utf8.encode(s);
@@ -107,6 +124,8 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   late final TerminalInputHandler _inputHandler;
   final _focusNode = FocusNode();
   bool _connecting = false;
+  int _lastCols = 0;
+  int _lastRows = 0;
 
   @override
   void initState() {
@@ -140,18 +159,43 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
+  /// 终端区域大小变化时，计算新的行列数并通知 Rust 调整 PTY 大小
+  void _onTerminalResize(double width, double height) {
+    if (_currentSession == null) return;
+
+    // 与 terminal_painter.dart 中的常量保持一致
+    const cellWidth = 8.0;
+    const cellHeight = 16.0;
+    const leftPadding = 4.0;
+    const topPadding = 4.0;
+
+    final cols = ((width - leftPadding * 2) / cellWidth).floor();
+    final rows = ((height - topPadding * 2) / cellHeight).floor();
+
+    if (cols > 0 && rows > 0 && (cols != _lastCols || rows != _lastRows)) {
+      _lastCols = cols;
+      _lastRows = rows;
+      _currentSession!.resize(cols, rows);
+    }
+  }
+
   Future<void> _connect(SshConfig config) async {
     setState(() => _connecting = true);
 
     try {
       // 在后台 Isolate 执行阻塞的 SSH 连接，避免冻结 UI
-      final sessionId = await _openSessionIsolate(
-        RustCore.libraryCandidates(),
-        config.host,
-        config.port,
-        config.username,
-        config.password,
-      );
+      // 设置 15 秒超时
+      final sessionId =
+          await _openSessionIsolate(
+            RustCore.libraryCandidates(),
+            config.host,
+            config.port,
+            config.username,
+            config.password,
+          ).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () => throw TimeoutException('连接超时 (15秒)'),
+          );
 
       if (sessionId == 0) {
         throw Exception('连接失败: 返回会话 ID 为 0');
@@ -169,6 +213,11 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
 
       // 获取焦点以便接收键盘输入
       _focusNode.requestFocus();
+
+      // 连接成功后发送初始终端大小（如果 LayoutBuilder 已经触发过）
+      if (_lastCols > 0 && _lastRows > 0) {
+        session.resize(_lastCols, _lastRows);
+      }
     } catch (e) {
       setState(() => _connecting = false);
       if (mounted) {
@@ -232,16 +281,32 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                             child: Column(
                               mainAxisSize: MainAxisSize.min,
                               children: [
-                                CircularProgressIndicator(color: Color(0xff2f6fed)),
+                                CircularProgressIndicator(
+                                  color: Color(0xff2f6fed),
+                                ),
                                 SizedBox(height: 16),
-                                Text('正在连接...', style: TextStyle(color: Color(0xff8e98a8))),
+                                Text(
+                                  '正在连接...',
+                                  style: TextStyle(color: Color(0xff8e98a8)),
+                                ),
                               ],
                             ),
                           )
-                        : KeyboardListener(
-                            focusNode: _focusNode,
-                            onKeyEvent: _inputHandler.handleKeyEvent,
-                            child: TerminalView(snapshot: _snapshot),
+                        : LayoutBuilder(
+                            builder: (context, constraints) {
+                              // 终端区域大小变化时，调整 PTY 大小
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                _onTerminalResize(
+                                  constraints.maxWidth,
+                                  constraints.maxHeight,
+                                );
+                              });
+                              return KeyboardListener(
+                                focusNode: _focusNode,
+                                onKeyEvent: _inputHandler.handleKeyEvent,
+                                child: TerminalView(snapshot: _snapshot),
+                              );
+                            },
                           ),
                   ),
                 ),
@@ -405,7 +470,9 @@ class _TopBar extends StatelessWidget {
           const Icon(Icons.memory_rounded, size: 18, color: Color(0xff8fb6ff)),
           const SizedBox(width: 10),
           Text(
-            session != null ? 'SSH Session #${session!.id}' : 'Rust core bridge',
+            session != null
+                ? 'SSH Session #${session!.id}'
+                : 'Rust core bridge',
             style: const TextStyle(fontWeight: FontWeight.w700),
           ),
           const Spacer(),

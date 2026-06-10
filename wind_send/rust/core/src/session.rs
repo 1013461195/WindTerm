@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 /// SSH session 状态
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum SessionState {
     Created,
     Connecting,
@@ -24,6 +25,7 @@ pub struct SessionConfig {
 }
 
 /// SSH session 封装
+#[allow(dead_code)]
 pub struct SshSession {
     id: u64,
     config: SessionConfig,
@@ -49,6 +51,7 @@ impl SshSession {
         }
     }
 
+    #[allow(dead_code)]
     pub fn id(&self) -> u64 {
         self.id
     }
@@ -117,8 +120,8 @@ impl SshSession {
             .shell()
             .map_err(|e| format!("请求 shell 失败: {}", e))?;
 
-        // 设置非阻塞模式，避免 read_output 阻塞 UI 线程
-        channel.set_blocking(false);
+        // 所有阻塞操作完成，设置非阻塞模式用于后续 read_output
+        session.set_blocking(false);
 
         self.session = Some(session);
         self.channel = Some(channel);

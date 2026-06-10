@@ -33,3 +33,13 @@
 - 修复本机 Rust toolchain：重新执行 `~/.cargo/bin/rustup toolchain install stable --profile minimal` 直到完成。
 - 执行 `cd wind_send/rust && ~/.cargo/bin/cargo build`。
 - 运行 Flutter 桌面应用，确认 Rust dylib 被加载，终端输出从 `[rust]` 而不是 `[dart fallback]` 开始。
+
+## 2026-06-10 Phase 0 补充
+
+已完成：
+
+- Rust toolchain 验证：`rustup show` 确认 stable-x86_64-unknown-linux-gnu 已安装。
+- Rust core 编译成功：`cargo build` 生成 `librust_core.so` (4.7MB, ELF 64-bit shared object)。
+- 编译路径：`wind_send/rust/target/debug/librust_core.so`。
+
+Phase 0 状态：**代码层面全部完成**，仅剩 Flutter 桌面运行验证。

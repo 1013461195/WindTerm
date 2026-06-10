@@ -1,0 +1,32 @@
+# Cargo build output
+target/
+doc/
+
+# 编译产物
+*.d
+*.o
+*.so
+*.dylib
+*.dll
+*.rlib
+*.rmeta
+*.pdb
+
+# Cargo lock (库项目可以提交，应用项目可以忽略)
+# Cargo.lock
+
+# Rust 临时文件
+*.rs.bk
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Rust Analyzer
+rust-analyzer.json
+
+# 系统文件
+.DS_Store
+Thumbs.db

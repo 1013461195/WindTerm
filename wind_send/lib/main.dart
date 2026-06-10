@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -8,6 +13,59 @@ import 'core_bridge/rust_core.dart';
 import 'features/session/session_editor.dart';
 import 'features/terminal/terminal_painter.dart';
 import 'features/terminal/terminal_input.dart';
+
+// ── FFI 类型签名（与 rust_core.dart 保持一致） ──
+
+typedef _SessionOpenNative = Uint64 Function(
+  Pointer<Utf8Char> host, Uint16 port,
+  Pointer<Utf8Char> username, Pointer<Utf8Char> password,
+);
+typedef _SessionOpenDart = int Function(
+  Pointer<Utf8Char> host, int port,
+  Pointer<Utf8Char> username, Pointer<Utf8Char> password,
+);
+
+typedef _StringFreeNative = Void Function(Pointer<Utf8Char>);
+typedef _StringFreeDart = void Function(Pointer<Utf8Char>);
+
+/// 在后台 Isolate 中执行阻塞的 SSH 连接
+Future<int> _openSessionIsolate(
+  List<String> libCandidates, String host, int port,
+  String username, String password,
+) {
+  return Isolate.run(() {
+    // 每个 Isolate 需要自行打开动态库
+    DynamicLibrary? lib;
+    for (final path in libCandidates) {
+      try { lib = DynamicLibrary.open(path); break; } on Object { continue; }
+    }
+    if (lib == null) return 0;
+
+    final sessionOpen = lib.lookupFunction<_SessionOpenNative, _SessionOpenDart>('core_session_open');
+    final stringFree  = lib.lookupFunction<_StringFreeNative,  _StringFreeDart>('core_string_free');
+
+    Pointer<Utf8Char> toUtf8(String s) {
+      final units = utf8.encode(s);
+      final p = malloc.allocate<Uint8>(units.length + 1).cast<Utf8Char>();
+      for (var i = 0; i < units.length; i++) {
+        (p.cast<Uint8>() + i).value = units[i];
+      }
+      (p.cast<Uint8>() + units.length).value = 0;
+      return p;
+    }
+
+    final h = toUtf8(host);
+    final u = toUtf8(username);
+    final pw = toUtf8(password);
+    try {
+      return sessionOpen(h, port, u, pw);
+    } finally {
+      stringFree(h);
+      stringFree(u);
+      stringFree(pw);
+    }
+  });
+}
 
 void main() {
   runApp(const WindSendApp());
@@ -48,6 +106,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   Timer? _pollTimer;
   late final TerminalInputHandler _inputHandler;
   final _focusNode = FocusNode();
+  bool _connecting = false;
 
   @override
   void initState() {
@@ -81,17 +140,28 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
-  void _connect(SshConfig config) {
+  Future<void> _connect(SshConfig config) async {
+    setState(() => _connecting = true);
+
     try {
-      final session = _core.openSession(
-        host: config.host,
-        port: config.port,
-        username: config.username,
-        password: config.password,
+      // 在后台 Isolate 执行阻塞的 SSH 连接，避免冻结 UI
+      final sessionId = await _openSessionIsolate(
+        RustCore.libraryCandidates(),
+        config.host,
+        config.port,
+        config.username,
+        config.password,
       );
+
+      if (sessionId == 0) {
+        throw Exception('连接失败: 返回会话 ID 为 0');
+      }
+
+      final session = SshSession(sessionId, _core);
 
       setState(() {
         _currentSession = session;
+        _connecting = false;
       });
 
       // 启动轮询
@@ -100,12 +170,15 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       // 获取焦点以便接收键盘输入
       _focusNode.requestFocus();
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('连接失败: $e'),
-          backgroundColor: Colors.redAccent,
-        ),
-      );
+      setState(() => _connecting = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('连接失败: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
     }
   }
 
@@ -141,6 +214,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
             currentSession: _currentSession,
             onNewSession: _openSessionEditor,
             onDisconnect: _disconnect,
+            connecting: _connecting,
           ),
           Expanded(
             child: Column(
@@ -148,15 +222,27 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                 _TopBar(
                   core: _core,
                   session: _currentSession,
+                  connecting: _connecting,
                 ),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                    child: KeyboardListener(
-                      focusNode: _focusNode,
-                      onKeyEvent: _inputHandler.handleKeyEvent,
-                      child: TerminalView(snapshot: _snapshot),
-                    ),
+                    child: _connecting
+                        ? const Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircularProgressIndicator(color: Color(0xff2f6fed)),
+                                SizedBox(height: 16),
+                                Text('正在连接...', style: TextStyle(color: Color(0xff8e98a8))),
+                              ],
+                            ),
+                          )
+                        : KeyboardListener(
+                            focusNode: _focusNode,
+                            onKeyEvent: _inputHandler.handleKeyEvent,
+                            child: TerminalView(snapshot: _snapshot),
+                          ),
                   ),
                 ),
               ],
@@ -172,11 +258,13 @@ class _SessionRail extends StatelessWidget {
   final SshSession? currentSession;
   final VoidCallback onNewSession;
   final VoidCallback onDisconnect;
+  final bool connecting;
 
   const _SessionRail({
     this.currentSession,
     required this.onNewSession,
     required this.onDisconnect,
+    this.connecting = false,
   });
 
   @override
@@ -200,9 +288,9 @@ class _SessionRail extends StatelessWidget {
             ),
             _NavItem(
               icon: Icons.add_rounded,
-              label: '新建连接',
+              label: connecting ? '连接中...' : '新建连接',
               selected: false,
-              onTap: onNewSession,
+              onTap: connecting ? () {} : onNewSession,
             ),
             if (currentSession != null) ...[
               const Divider(color: Color(0xff2a303b), height: 28),
@@ -294,11 +382,21 @@ class _NavItem extends StatelessWidget {
 class _TopBar extends StatelessWidget {
   final RustCore core;
   final SshSession? session;
+  final bool connecting;
 
-  const _TopBar({required this.core, this.session});
+  const _TopBar({required this.core, this.session, this.connecting = false});
 
   @override
   Widget build(BuildContext context) {
+    final String statusText;
+    if (connecting) {
+      statusText = 'connecting...';
+    } else if (session != null) {
+      statusText = session!.getState();
+    } else {
+      statusText = 'disconnected';
+    }
+
     return Container(
       height: 58,
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -320,7 +418,7 @@ class _TopBar extends StatelessWidget {
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(
-              session != null ? session!.getState() : 'disconnected',
+              statusText,
               style: const TextStyle(color: Color(0xffaeb8c8), fontSize: 12),
             ),
           ),

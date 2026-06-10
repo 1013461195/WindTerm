@@ -96,24 +96,25 @@ pub extern "C" fn core_session_close(session_id: u64) {
 /// 读取输出并更新终端
 #[no_mangle]
 pub extern "C" fn core_session_read(session_id: u64) -> *mut c_char {
-    let mut sessions = sessions().lock().expect("session mutex poisoned");
-    let session = match sessions.get_mut(&session_id) {
-        Some(s) => s,
-        None => return std::ptr::null_mut(),
+    // 读取输出（短暂持有 sessions 锁）
+    let output = {
+        let mut sessions = sessions().lock().expect("session mutex poisoned");
+        match sessions.get_mut(&session_id) {
+            Some(s) => s.read_output(),
+            None => return std::ptr::null_mut(),
+        }
     };
 
-    let output = session.read_output();
     if output.is_empty() {
         return std::ptr::null_mut();
     }
 
-    // 更新终端
+    // 更新终端（短暂持有 terminals 锁）
     let mut terminals = terminals().lock().expect("terminal mutex poisoned");
     if let Some(terminal) = terminals.get_mut(&session_id) {
         terminal.process(&output);
         let snapshot = terminal.snapshot();
 
-        // 序列化为 JSON
         match serde_json::to_string(&snapshot) {
             Ok(json) => into_c_string(&json),
             Err(_) => std::ptr::null_mut(),

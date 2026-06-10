@@ -117,6 +117,9 @@ impl SshSession {
             .shell()
             .map_err(|e| format!("请求 shell 失败: {}", e))?;
 
+        // 设置非阻塞模式，避免 read_output 阻塞 UI 线程
+        channel.set_blocking(false);
+
         self.session = Some(session);
         self.channel = Some(channel);
         self.state = SessionState::Running;

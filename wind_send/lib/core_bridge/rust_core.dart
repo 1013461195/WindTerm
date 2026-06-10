@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:ffi/ffi.dart';
 
 // FFI 类型定义
 
@@ -274,7 +275,7 @@ abstract class RustCore {
   }
 
   static DynamicLibrary? _tryOpenLibrary() {
-    final List<String> candidates = _libraryCandidates();
+    final List<String> candidates = libraryCandidates();
     for (final String candidate in candidates) {
       try {
         return DynamicLibrary.open(candidate);
@@ -285,7 +286,7 @@ abstract class RustCore {
     return null;
   }
 
-  static List<String> _libraryCandidates() {
+  static List<String> libraryCandidates() {
     final String cwd = Directory.current.path;
     if (Platform.isMacOS) {
       return <String>[
@@ -396,12 +397,12 @@ class NativeRustCore implements RustCore {
 
   @override
   int sessionWrite(int sessionId, List<int> data) {
-    final ptr = calloc<Uint8>(data.length);
+    final ptr = malloc.allocate<Uint8>(data.length);
     for (int i = 0; i < data.length; i++) {
       ptr[i] = data[i];
     }
     final result = _sessionWrite(sessionId, ptr, data.length);
-    calloc.free(ptr);
+    malloc.free(ptr);
     return result;
   }
 
@@ -447,7 +448,7 @@ class NativeRustCore implements RustCore {
 
   Pointer<Utf8Char> _toUtf8(String str) {
     final units = utf8.encode(str);
-    final ptr = calloc<Utf8Char>(units.length + 1);
+    final ptr = malloc.allocate<Uint8>(units.length + 1).cast<Utf8Char>();
     for (int i = 0; i < units.length; i++) {
       (ptr.cast<Uint8>() + i).value = units[i];
     }
@@ -456,18 +457,6 @@ class NativeRustCore implements RustCore {
   }
 }
 
-// 简单的内存分配器（MVP 阶段）
-final calloc = _Calloc();
-
-class _Calloc {
-  Pointer<T> allocate<T extends NativeType>(int count) {
-    return calloc.allocate<T>(count);
-  }
-
-  void free(Pointer ptr) {
-    calloc.free(ptr);
-  }
-}
 
 // Dart Mock Core 实现（用于无 Rust 库时的开发）
 class DartMockCore implements RustCore {

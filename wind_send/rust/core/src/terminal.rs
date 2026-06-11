@@ -1,5 +1,6 @@
-use vte::{Parser, Perform};
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthChar;
+use vte::{Parser, Perform};
 
 /// 鼠标跟踪模式
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -16,6 +17,7 @@ pub enum MouseTrackingMode {
 
 /// 鼠标事件编码格式
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code, clippy::upper_case_acronyms)]
 pub enum MouseEncoding {
     /// X10 编码（默认）
     X10,
@@ -103,7 +105,7 @@ impl Default for CellAttr {
 /// 终端单元格
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Cell {
-    pub ch: char,
+    pub ch: String,
     pub attr: CellAttr,
     /// 宽字符占位标记：0=正常，1=宽字符首字符，2=宽字符续字符（占位）
     pub wide: u8,
@@ -112,30 +114,40 @@ pub struct Cell {
 impl Default for Cell {
     fn default() -> Self {
         Self {
-            ch: ' ',
+            ch: " ".to_string(),
             attr: CellAttr::default(),
             wide: 0,
         }
     }
 }
 
-/// 判断字符是否为宽字符（CJK 等全角字符）
-fn is_wide_char(c: char) -> bool {
+fn character_width(c: char) -> usize {
+    let width = c.width().unwrap_or(0);
+    if width == 1 && is_emoji(c) {
+        2
+    } else {
+        width
+    }
+}
+
+fn is_emoji(c: char) -> bool {
     matches!(c,
-        '\u{1100}'..='\u{115f}' |
-        '\u{2e80}'..='\u{303e}' |
-        '\u{3040}'..='\u{33bf}' |
-        '\u{3400}'..='\u{4dbf}' |
-        '\u{4e00}'..='\u{9fff}' |
-        '\u{a000}'..='\u{a4cf}' |
-        '\u{ac00}'..='\u{d7a3}' |
-        '\u{f900}'..='\u{faff}' |
-        '\u{fe30}'..='\u{fe6f}' |
-        '\u{ff01}'..='\u{ff60}' |
-        '\u{ffe0}'..='\u{ffe6}' |
-        '\u{20000}'..='\u{2fffd}' |
-        '\u{30000}'..='\u{3fffd}'
+        '\u{1f000}'..='\u{1faff}' |
+        '\u{2600}'..='\u{27bf}' |
+        '\u{2300}'..='\u{23ff}'
     )
+}
+
+fn is_emoji_modifier(c: char) -> bool {
+    matches!(c, '\u{1f3fb}'..='\u{1f3ff}')
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1f1e6}'..='\u{1f1ff}')
+}
+
+fn default_tab_stops(cols: usize) -> Vec<bool> {
+    (0..cols).map(|col| col != 0 && col % 8 == 0).collect()
 }
 
 /// 终端行
@@ -163,16 +175,28 @@ pub struct TerminalSnapshot {
     pub lines: Vec<TerminalLine>,
     pub scrollback: Vec<TerminalLine>,
     pub scroll_offset: usize,
+    #[serde(default)]
+    pub output_text: String,
+    pub application_cursor_mode: bool,
+    pub bracketed_paste: bool,
 }
 
 /// 辅助函数：从 Params 中提取第一个参数
 fn first_param(params: &vte::Params, default: u16) -> u16 {
-    params.iter().next().and_then(|p| p.first().copied()).unwrap_or(default)
+    params
+        .iter()
+        .next()
+        .and_then(|p| p.first().copied())
+        .unwrap_or(default)
 }
 
 /// 辅助函数：从 Params 中提取第二个参数
 fn second_param(params: &vte::Params, default: u16) -> u16 {
-    params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(default)
+    params
+        .iter()
+        .nth(1)
+        .and_then(|p| p.first().copied())
+        .unwrap_or(default)
 }
 
 /// 终端解析器
@@ -188,6 +212,8 @@ pub struct Terminal {
     scrollback: Vec<TerminalLine>,
     scrollback_limit: usize,
     scroll_offset: usize,
+    tab_stops: Vec<bool>,
+    pending_responses: Vec<u8>,
     /// 保存的光标位置（ESC 7）
     saved_cursor_row: usize,
     saved_cursor_col: usize,
@@ -197,14 +223,18 @@ pub struct Terminal {
     scroll_bottom: usize,
     /// 插入模式
     insert_mode: bool,
+    application_cursor_mode: bool,
+    bracketed_paste: bool,
     /// 鼠标跟踪模式
     mouse_tracking_mode: MouseTrackingMode,
+    mouse_encoding: MouseEncoding,
     /// 鼠标按键跟踪模式（SGR 扩展）
     mouse_button_tracking: bool,
     /// 鼠标运动跟踪模式
     mouse_motion_tracking: bool,
     /// 鼠标所有事件跟踪模式
     mouse_any_event_tracking: bool,
+    alternate_screen: Option<(Vec<TerminalLine>, usize, usize, Vec<TerminalLine>)>,
 }
 
 impl Terminal {
@@ -222,16 +252,22 @@ impl Terminal {
             scrollback: Vec::new(),
             scrollback_limit: 10000,
             scroll_offset: 0,
+            tab_stops: default_tab_stops(cols),
+            pending_responses: Vec::new(),
             saved_cursor_row: 0,
             saved_cursor_col: 0,
             saved_attr: CellAttr::default(),
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             insert_mode: false,
+            application_cursor_mode: false,
+            bracketed_paste: false,
             mouse_tracking_mode: MouseTrackingMode::None,
+            mouse_encoding: MouseEncoding::X10,
             mouse_button_tracking: false,
             mouse_motion_tracking: false,
             mouse_any_event_tracking: false,
+            alternate_screen: None,
         }
     }
 
@@ -239,9 +275,7 @@ impl Terminal {
     pub fn process(&mut self, data: &[u8]) {
         let mut parser = std::mem::take(&mut self.parser);
         for &byte in data {
-            let mut performer = TerminalPerformer {
-                terminal: self,
-            };
+            let mut performer = TerminalPerformer { terminal: self };
             parser.advance(&mut performer, byte);
         }
         self.parser = parser;
@@ -258,6 +292,9 @@ impl Terminal {
             lines: self.lines.clone(),
             scrollback: self.scrollback.clone(),
             scroll_offset: self.scroll_offset,
+            output_text: String::new(),
+            application_cursor_mode: self.application_cursor_mode,
+            bracketed_paste: self.bracketed_paste,
         }
     }
 
@@ -278,6 +315,12 @@ impl Terminal {
                 line.cells.push(Cell::default());
             }
             line.cells.truncate(cols);
+        }
+        self.tab_stops.resize(cols, false);
+        for col in 1..cols {
+            if col % 8 == 0 {
+                self.tab_stops[col] = true;
+            }
         }
 
         // 重置滚动区域
@@ -302,13 +345,15 @@ impl Terminal {
             self.lines.remove(self.scroll_top);
         }
         // 在滚动区域底部插入空行
-        self.lines.insert(self.scroll_bottom, TerminalLine::new(self.cols));
+        self.lines
+            .insert(self.scroll_bottom, TerminalLine::new(self.cols));
     }
 
     /// 在滚动区域范围内向下滚动
     fn scroll_down(&mut self) {
         self.lines.remove(self.scroll_bottom);
-        self.lines.insert(self.scroll_top, TerminalLine::new(self.cols));
+        self.lines
+            .insert(self.scroll_top, TerminalLine::new(self.cols));
     }
 
     /// 换行
@@ -340,8 +385,13 @@ impl Terminal {
 
     /// 水平制表符
     fn tab(&mut self) {
-        let next_tab = (self.cursor_col / 8 + 1) * 8;
-        self.cursor_col = next_tab.min(self.cols.saturating_sub(1));
+        self.cursor_col = ((self.cursor_col + 1)..self.cols)
+            .find(|&col| self.tab_stops.get(col).copied().unwrap_or(false))
+            .unwrap_or_else(|| self.cols.saturating_sub(1));
+    }
+
+    pub fn take_pending_responses(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending_responses)
     }
 
     /// 清除屏幕
@@ -366,7 +416,24 @@ impl Terminal {
 
     /// 在当前位置写入一个字符（支持宽字符）
     fn put_char(&mut self, c: char) {
-        let wide = is_wide_char(c);
+        if self.cols == 0 || self.rows == 0 {
+            return;
+        }
+        let width = character_width(c);
+        if width == 0 || c == '\u{200d}' || is_emoji_modifier(c) {
+            self.append_to_previous_cell(c);
+            return;
+        }
+        if self.previous_cell_ends_with_joiner()
+            || (is_regional_indicator(c) && self.previous_cell_ends_with_regional_indicator())
+        {
+            self.append_to_previous_cell(c);
+            return;
+        }
+        if self.cursor_col >= self.cols {
+            self.newline();
+        }
+        let wide = width >= 2;
         if wide && self.cursor_col + 1 >= self.cols {
             // 宽字符放不下，换到下一行开头
             self.newline();
@@ -386,20 +453,83 @@ impl Terminal {
         if self.cursor_col < self.cols {
             if let Some(line) = self.lines.get_mut(self.cursor_row) {
                 if let Some(cell) = line.cells.get_mut(self.cursor_col) {
-                    cell.ch = c;
+                    cell.ch = c.to_string();
                     cell.attr = self.current_attr.clone();
                     cell.wide = if wide { 1 } else { 0 };
                 }
                 // 宽字符占两个格子
                 if wide && self.cursor_col + 1 < self.cols {
                     if let Some(next_cell) = line.cells.get_mut(self.cursor_col + 1) {
-                        next_cell.ch = '\0'; // 占位符，渲染时跳过
+                        next_cell.ch.clear();
                         next_cell.attr = self.current_attr.clone();
                         next_cell.wide = 2;
                     }
                 }
             }
             self.cursor_col += if wide { 2 } else { 1 };
+        }
+    }
+
+    fn previous_cell_position(&self) -> Option<(usize, usize)> {
+        if self.cursor_col > 0 {
+            let mut col = self.cursor_col - 1;
+            if self.lines[self.cursor_row].cells[col].wide == 2 && col > 0 {
+                col -= 1;
+            }
+            Some((self.cursor_row, col))
+        } else if self.cursor_row > 0 && self.cols > 0 {
+            let mut col = self.cols - 1;
+            if self.lines[self.cursor_row - 1].cells[col].wide == 2 && col > 0 {
+                col -= 1;
+            }
+            Some((self.cursor_row - 1, col))
+        } else {
+            None
+        }
+    }
+
+    fn previous_cell_ends_with_joiner(&self) -> bool {
+        self.previous_cell_position()
+            .and_then(|(row, col)| self.lines.get(row)?.cells.get(col))
+            .is_some_and(|cell| cell.ch.ends_with('\u{200d}'))
+    }
+
+    fn previous_cell_ends_with_regional_indicator(&self) -> bool {
+        self.previous_cell_position()
+            .and_then(|(row, col)| self.lines.get(row)?.cells.get(col))
+            .and_then(|cell| cell.ch.chars().last())
+            .is_some_and(is_regional_indicator)
+    }
+
+    fn append_to_previous_cell(&mut self, c: char) {
+        if let Some((row, col)) = self.previous_cell_position() {
+            self.lines[row].cells[col].ch.push(c);
+        }
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        if self.alternate_screen.is_some() {
+            return;
+        }
+        self.alternate_screen = Some((
+            std::mem::replace(
+                &mut self.lines,
+                vec![TerminalLine::new(self.cols); self.rows],
+            ),
+            self.cursor_row,
+            self.cursor_col,
+            std::mem::take(&mut self.scrollback),
+        ));
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    fn leave_alternate_screen(&mut self) {
+        if let Some((lines, cursor_row, cursor_col, scrollback)) = self.alternate_screen.take() {
+            self.lines = lines;
+            self.cursor_row = cursor_row.min(self.rows.saturating_sub(1));
+            self.cursor_col = cursor_col.min(self.cols.saturating_sub(1));
+            self.scrollback = scrollback;
         }
     }
 
@@ -424,7 +554,8 @@ impl Terminal {
                 if self.lines.len() > self.scroll_bottom {
                     self.lines.remove(self.scroll_bottom);
                 }
-                self.lines.insert(self.cursor_row, TerminalLine::new(self.cols));
+                self.lines
+                    .insert(self.cursor_row, TerminalLine::new(self.cols));
             }
         }
     }
@@ -434,7 +565,8 @@ impl Terminal {
         if self.cursor_row >= self.scroll_top && self.cursor_row <= self.scroll_bottom {
             for _ in 0..n {
                 self.lines.remove(self.cursor_row);
-                self.lines.insert(self.scroll_bottom, TerminalLine::new(self.cols));
+                self.lines
+                    .insert(self.scroll_bottom, TerminalLine::new(self.cols));
             }
         }
     }
@@ -500,7 +632,6 @@ impl Terminal {
             }
         }
 
-        // 使用 SGR 编码（支持扩展）
         let button = match event.button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -508,11 +639,13 @@ impl Terminal {
             MouseButton::None => 3,
         };
 
-        let mut cb = button;
-        if event.event_type == MouseEventType::Press {
-            cb |= 0; // 按下
-        } else if event.event_type == MouseEventType::Release {
-            cb |= 0x40; // 释放（SGR 扩展）
+        let mut cb = if event.event_type == MouseEventType::Release {
+            3
+        } else {
+            button
+        };
+        if event.event_type == MouseEventType::Motion {
+            cb |= 32;
         }
 
         if event.shift {
@@ -525,20 +658,36 @@ impl Terminal {
             cb |= 16;
         }
 
-        // SGR 编码格式: CSI < Cb ; Cx ; Cy M/m
-        let mut seq = Vec::new();
-        seq.extend_from_slice(b"\x1b[<");
-        seq.extend_from_slice(cb.to_string().as_bytes());
-        seq.push(b';');
-        seq.extend_from_slice((event.col + 1).to_string().as_bytes());
-        seq.push(b';');
-        seq.extend_from_slice((event.row + 1).to_string().as_bytes());
-        if event.event_type == MouseEventType::Release {
-            seq.push(b'm'); // SGR 释放
-        } else {
-            seq.push(b'M'); // SGR 按下
+        match self.mouse_encoding {
+            MouseEncoding::SGR => {
+                let mut seq = Vec::new();
+                seq.extend_from_slice(b"\x1b[<");
+                seq.extend_from_slice(cb.to_string().as_bytes());
+                seq.push(b';');
+                seq.extend_from_slice((event.col + 1).to_string().as_bytes());
+                seq.push(b';');
+                seq.extend_from_slice((event.row + 1).to_string().as_bytes());
+                seq.push(if event.event_type == MouseEventType::Release {
+                    b'm'
+                } else {
+                    b'M'
+                });
+                seq
+            }
+            MouseEncoding::X10 => {
+                if event.col > 222 || event.row > 222 {
+                    return Vec::new();
+                }
+                vec![
+                    0x1b,
+                    b'[',
+                    b'M',
+                    (cb + 32) as u8,
+                    (event.col + 33) as u8,
+                    (event.row + 33) as u8,
+                ]
+            }
         }
-        seq
     }
 
     /// 设置鼠标跟踪模式
@@ -557,6 +706,7 @@ impl Terminal {
     }
 
     /// 设置鼠标运动跟踪
+    #[allow(dead_code)]
     pub fn set_mouse_motion_tracking(&mut self, enabled: bool) {
         self.mouse_motion_tracking = enabled;
         if enabled {
@@ -633,11 +783,8 @@ impl Terminal {
                             }
                             2 if i + 4 < p.len() => {
                                 // 38;2;R;G;B - RGB 色
-                                self.current_attr.fg = Color::Rgb(
-                                    p[i + 2] as u8,
-                                    p[i + 3] as u8,
-                                    p[i + 4] as u8,
-                                );
+                                self.current_attr.fg =
+                                    Color::Rgb(p[i + 2] as u8, p[i + 3] as u8, p[i + 4] as u8);
                                 i += 4;
                             }
                             _ => {}
@@ -669,11 +816,8 @@ impl Terminal {
                             }
                             2 if i + 4 < p.len() => {
                                 // 48;2;R;G;B - RGB 色
-                                self.current_attr.bg = Color::Rgb(
-                                    p[i + 2] as u8,
-                                    p[i + 3] as u8,
-                                    p[i + 4] as u8,
-                                );
+                                self.current_attr.bg =
+                                    Color::Rgb(p[i + 2] as u8, p[i + 3] as u8, p[i + 4] as u8);
                                 i += 4;
                             }
                             _ => {}
@@ -760,12 +904,14 @@ impl<'a> Perform for TerminalPerformer<'a> {
             'B' | 'e' => {
                 // 光标下移
                 let n = first_param(params, 1) as usize;
-                self.terminal.cursor_row = (self.terminal.cursor_row + n).min(self.terminal.rows.saturating_sub(1));
+                self.terminal.cursor_row =
+                    (self.terminal.cursor_row + n).min(self.terminal.rows.saturating_sub(1));
             }
             'C' | 'a' => {
                 // 光标右移
                 let n = first_param(params, 1) as usize;
-                self.terminal.cursor_col = (self.terminal.cursor_col + n).min(self.terminal.cols.saturating_sub(1));
+                self.terminal.cursor_col =
+                    (self.terminal.cursor_col + n).min(self.terminal.cols.saturating_sub(1));
             }
             'D' => {
                 // 光标左移
@@ -775,7 +921,8 @@ impl<'a> Perform for TerminalPerformer<'a> {
             'E' => {
                 // 光标下移 N 行到行首
                 let n = first_param(params, 1) as usize;
-                self.terminal.cursor_row = (self.terminal.cursor_row + n).min(self.terminal.rows.saturating_sub(1));
+                self.terminal.cursor_row =
+                    (self.terminal.cursor_row + n).min(self.terminal.rows.saturating_sub(1));
                 self.terminal.cursor_col = 0;
             }
             'F' => {
@@ -801,7 +948,9 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     0 => {
                         // 从光标到屏幕末尾
                         for col in self.terminal.cursor_col..self.terminal.cols {
-                            if let Some(line) = self.terminal.lines.get_mut(self.terminal.cursor_row) {
+                            if let Some(line) =
+                                self.terminal.lines.get_mut(self.terminal.cursor_row)
+                            {
                                 line.cells[col] = Cell::default();
                             }
                         }
@@ -819,7 +968,9 @@ impl<'a> Perform for TerminalPerformer<'a> {
                             }
                         }
                         for col in 0..=self.terminal.cursor_col {
-                            if let Some(line) = self.terminal.lines.get_mut(self.terminal.cursor_row) {
+                            if let Some(line) =
+                                self.terminal.lines.get_mut(self.terminal.cursor_row)
+                            {
                                 line.cells[col] = Cell::default();
                             }
                         }
@@ -840,7 +991,9 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     0 => {
                         // 从光标到行尾
                         for col in self.terminal.cursor_col..self.terminal.cols {
-                            if let Some(line) = self.terminal.lines.get_mut(self.terminal.cursor_row) {
+                            if let Some(line) =
+                                self.terminal.lines.get_mut(self.terminal.cursor_row)
+                            {
                                 line.cells[col] = Cell::default();
                             }
                         }
@@ -848,7 +1001,9 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     1 => {
                         // 从行开头到光标
                         for col in 0..=self.terminal.cursor_col {
-                            if let Some(line) = self.terminal.lines.get_mut(self.terminal.cursor_row) {
+                            if let Some(line) =
+                                self.terminal.lines.get_mut(self.terminal.cursor_row)
+                            {
                                 line.cells[col] = Cell::default();
                             }
                         }
@@ -892,16 +1047,28 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 let n = first_param(params, 1) as usize;
                 for i in 0..n {
                     let col = self.terminal.cursor_col + i;
-                    if col >= self.terminal.cols { break; }
+                    if col >= self.terminal.cols {
+                        break;
+                    }
                     if let Some(line) = self.terminal.lines.get_mut(self.terminal.cursor_row) {
                         line.cells[col] = Cell::default();
                     }
                 }
             }
+            'g' => match first_param(params, 0) {
+                0 => {
+                    if let Some(stop) = self.terminal.tab_stops.get_mut(self.terminal.cursor_col) {
+                        *stop = false;
+                    }
+                }
+                3 => self.terminal.tab_stops.fill(false),
+                _ => {}
+            },
             'r' => {
                 // 设置滚动区域（DECSTBM）
                 let top = first_param(params, 1).saturating_sub(1) as usize;
-                let bottom = second_param(params, self.terminal.rows as u16).saturating_sub(1) as usize;
+                let bottom =
+                    second_param(params, self.terminal.rows as u16).saturating_sub(1) as usize;
                 if top < bottom && bottom < self.terminal.rows {
                     self.terminal.scroll_top = top;
                     self.terminal.scroll_bottom = bottom;
@@ -925,7 +1092,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                             match param {
                                 25 => self.terminal.cursor_visible = true,
                                 7 => {} // 自动换行模式 (DECAWM) - 默认开启
-                                1 => {} // 应用光标键模式
+                                1 => self.terminal.application_cursor_mode = true,
                                 12 => {} // 光标闪烁
                                 1000 => {
                                     // 启用鼠标按键跟踪（X10 模式）
@@ -940,15 +1107,12 @@ impl<'a> Perform for TerminalPerformer<'a> {
                                     self.terminal.set_mouse_any_event_tracking(true);
                                 }
                                 1006 => {
-                                    // 启用 SGR 鼠标编码
-                                    // 暂不实现，使用默认编码
+                                    self.terminal.mouse_encoding = MouseEncoding::SGR;
                                 }
                                 1049 => {
-                                    // 切换到备用屏幕缓冲区
-                                    self.terminal.save_cursor();
-                                    self.terminal.clear_screen();
+                                    self.terminal.enter_alternate_screen();
                                 }
-                                2004 => {} // bracketed paste mode
+                                2004 => self.terminal.bracketed_paste = true,
                                 _ => {}
                             }
                         }
@@ -972,7 +1136,7 @@ impl<'a> Perform for TerminalPerformer<'a> {
                             match param {
                                 25 => self.terminal.cursor_visible = false,
                                 7 => {} // 关闭自动换行
-                                1 => {} // 关闭应用光标键模式
+                                1 => self.terminal.application_cursor_mode = false,
                                 1000 => {
                                     // 禁用鼠标跟踪
                                     self.terminal.set_mouse_tracking(MouseTrackingMode::None);
@@ -986,13 +1150,12 @@ impl<'a> Perform for TerminalPerformer<'a> {
                                     self.terminal.set_mouse_any_event_tracking(false);
                                 }
                                 1006 => {
-                                    // 禁用 SGR 鼠标编码
+                                    self.terminal.mouse_encoding = MouseEncoding::X10;
                                 }
                                 1049 => {
-                                    // 从备用屏幕缓冲区切回
-                                    self.terminal.restore_cursor();
+                                    self.terminal.leave_alternate_screen();
                                 }
-                                2004 => {}
+                                2004 => self.terminal.bracketed_paste = false,
                                 _ => {}
                             }
                         }
@@ -1009,13 +1172,25 @@ impl<'a> Perform for TerminalPerformer<'a> {
                     }
                 }
             }
-            'n' => {
-                // 设备状态报告 (DSR)
-                // 暂不实现回复（需要双向通道）
-            }
-            'c' => {
-                // 设备属性查询 (DA)
-                // 暂不实现回复
+            'n' => match first_param(params, 0) {
+                5 => self
+                    .terminal
+                    .pending_responses
+                    .extend_from_slice(b"\x1b[0n"),
+                6 => self.terminal.pending_responses.extend_from_slice(
+                    format!(
+                        "\x1b[{};{}R",
+                        self.terminal.cursor_row + 1,
+                        self.terminal.cursor_col + 1
+                    )
+                    .as_bytes(),
+                ),
+                _ => {}
+            },
+            'c' if !is_dec && first_param(params, 0) == 0 => {
+                self.terminal
+                    .pending_responses
+                    .extend_from_slice(b"\x1b[?1;2c");
             }
             _ => {}
         }
@@ -1036,6 +1211,8 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 self.terminal.scroll_bottom = self.terminal.rows.saturating_sub(1);
                 self.terminal.cursor_row = 0;
                 self.terminal.cursor_col = 0;
+                self.terminal.tab_stops = default_tab_stops(self.terminal.cols);
+                self.terminal.pending_responses.clear();
             }
             b'D' => {
                 // IND - 光标下移（相当于 \n 但不回车）
@@ -1058,11 +1235,139 @@ impl<'a> Perform for TerminalPerformer<'a> {
                 self.terminal.newline();
             }
             b'H' => {
-                // HTS - 设置水平制表位（暂不实现）
+                if let Some(stop) = self.terminal.tab_stops.get_mut(self.terminal.cursor_col) {
+                    *stop = true;
+                }
             }
             b'=' => {} // DECKPAM - 应用键盘模式
             b'>' => {} // DECKPNM - 普通键盘模式
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(terminal: &Terminal, row: usize) -> String {
+        terminal.lines[row]
+            .cells
+            .iter()
+            .filter(|cell| cell.wide != 2)
+            .fold(String::new(), |mut text, cell| {
+                text.push_str(&cell.ch);
+                text
+            })
+    }
+
+    #[test]
+    fn wraps_at_last_column() {
+        let mut terminal = Terminal::new(3, 2);
+        terminal.process(b"abcd");
+        assert_eq!(line_text(&terminal, 0), "abc");
+        assert_eq!(line_text(&terminal, 1), "d  ");
+        assert_eq!((terminal.cursor_row, terminal.cursor_col), (1, 1));
+    }
+
+    #[test]
+    fn restores_primary_screen_after_alternate_screen() {
+        let mut terminal = Terminal::new(8, 2);
+        terminal.process(b"primary");
+        terminal.process(b"\x1b[?1049h");
+        terminal.process(b"alt");
+        assert!(line_text(&terminal, 0).starts_with("alt"));
+        terminal.process(b"\x1b[?1049l");
+        assert!(line_text(&terminal, 0).starts_with("primary"));
+    }
+
+    #[test]
+    fn parses_true_color() {
+        let mut terminal = Terminal::new(4, 1);
+        terminal.process(b"\x1b[38;2;1;2;3mX");
+        assert!(matches!(
+            terminal.lines[0].cells[0].attr.fg,
+            Color::Rgb(1, 2, 3)
+        ));
+    }
+
+    #[test]
+    fn wide_character_uses_two_cells() {
+        let mut terminal = Terminal::new(4, 1);
+        terminal.process("中".as_bytes());
+        assert_eq!(terminal.lines[0].cells[0].wide, 1);
+        assert_eq!(terminal.lines[0].cells[1].wide, 2);
+        assert_eq!(terminal.cursor_col, 2);
+    }
+
+    #[test]
+    fn combining_mark_stays_in_previous_cell() {
+        let mut terminal = Terminal::new(4, 1);
+        terminal.process("e\u{301}x".as_bytes());
+        assert_eq!(terminal.lines[0].cells[0].ch, "e\u{301}");
+        assert_eq!(terminal.lines[0].cells[1].ch, "x");
+        assert_eq!(terminal.cursor_col, 2);
+    }
+
+    #[test]
+    fn emoji_clusters_use_two_cells() {
+        let mut terminal = Terminal::new(8, 1);
+        terminal.process("👩‍💻X".as_bytes());
+        assert_eq!(terminal.lines[0].cells[0].ch, "👩‍💻");
+        assert_eq!(terminal.lines[0].cells[1].wide, 2);
+        assert_eq!(terminal.lines[0].cells[2].ch, "X");
+        assert_eq!(terminal.cursor_col, 3);
+    }
+
+    #[test]
+    fn tracks_application_cursor_and_bracketed_paste_modes() {
+        let mut terminal = Terminal::new(8, 2);
+        terminal.process(b"\x1b[?1h\x1b[?2004h");
+        let enabled = terminal.snapshot();
+        assert!(enabled.application_cursor_mode);
+        assert!(enabled.bracketed_paste);
+        terminal.process(b"\x1b[?1l\x1b[?2004l");
+        let disabled = terminal.snapshot();
+        assert!(!disabled.application_cursor_mode);
+        assert!(!disabled.bracketed_paste);
+    }
+
+    #[test]
+    fn supports_custom_tab_stops() {
+        let mut terminal = Terminal::new(16, 1);
+        terminal.process(b"\x1b[3g\x1b[5G\x1bH\r\tX");
+        assert_eq!(terminal.lines[0].cells[4].ch, "X");
+        assert_eq!(terminal.cursor_col, 5);
+    }
+
+    #[test]
+    fn queues_device_status_and_attribute_responses() {
+        let mut terminal = Terminal::new(16, 4);
+        terminal.process(b"\x1b[2;3H\x1b[5n\x1b[6n\x1b[c");
+        assert_eq!(
+            terminal.take_pending_responses(),
+            b"\x1b[0n\x1b[2;3R\x1b[?1;2c"
+        );
+    }
+
+    #[test]
+    fn switches_between_x10_and_sgr_mouse_encoding() {
+        let mut terminal = Terminal::new(80, 24);
+        let event = MouseEvent {
+            event_type: MouseEventType::Press,
+            button: MouseButton::Left,
+            col: 4,
+            row: 2,
+            shift: false,
+            meta: false,
+            ctrl: false,
+        };
+        terminal.process(b"\x1b[?1000h");
+        assert_eq!(
+            terminal.encode_mouse_event(&event),
+            vec![0x1b, b'[', b'M', 32, 37, 35]
+        );
+        terminal.process(b"\x1b[?1006h");
+        assert_eq!(terminal.encode_mouse_event(&event), b"\x1b[<0;5;3M");
     }
 }

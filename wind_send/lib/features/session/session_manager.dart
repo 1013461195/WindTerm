@@ -3,12 +3,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import '../../core_bridge/rust_core.dart';
+import '../protocol/protocol_config.dart';
 
 /// 会话类型
-enum SessionType {
-  ssh,
-  localShell,
-}
+enum SessionType { ssh, localShell, telnet, rawTcp, serial }
 
 /// 会话信息
 class SessionInfo {
@@ -16,6 +14,7 @@ class SessionInfo {
   final String name;
   final SessionType type;
   final dynamic session; // SshSession or LocalShellSession
+  final Map<String, Object?>? profileConfig;
   final TerminalSnapshot? snapshot;
   final String state;
 
@@ -24,6 +23,7 @@ class SessionInfo {
     required this.name,
     required this.type,
     required this.session,
+    this.profileConfig,
     this.snapshot,
     this.state = 'created',
   });
@@ -33,6 +33,7 @@ class SessionInfo {
     String? name,
     SessionType? type,
     dynamic session,
+    Map<String, Object?>? profileConfig,
     TerminalSnapshot? snapshot,
     String? state,
   }) {
@@ -41,6 +42,7 @@ class SessionInfo {
       name: name ?? this.name,
       type: type ?? this.type,
       session: session ?? this.session,
+      profileConfig: profileConfig ?? this.profileConfig,
       snapshot: snapshot ?? this.snapshot,
       state: state ?? this.state,
     );
@@ -53,24 +55,35 @@ class SessionManager {
   final List<SessionInfo> _sessions = [];
   int _activeSessionIndex = -1;
   Timer? _pollTimer;
+  bool _syncInput = false;
 
   final void Function(List<SessionInfo> sessions) onSessionsChanged;
   final void Function(int activeIndex) onActiveSessionChanged;
   final void Function(TerminalSnapshot snapshot) onSnapshotUpdated;
+  final void Function(SessionInfo session, TerminalSnapshot snapshot)?
+  onSessionOutput;
+  final void Function(SessionInfo session)? onReconnectRequired;
 
   SessionManager({
     required this._core,
     required this.onSessionsChanged,
     required this.onActiveSessionChanged,
     required this.onSnapshotUpdated,
+    this.onSessionOutput,
+    this.onReconnectRequired,
   });
 
   List<SessionInfo> get sessions => List.unmodifiable(_sessions);
   int get activeSessionIndex => _activeSessionIndex;
   SessionInfo? get activeSession =>
       _activeSessionIndex >= 0 && _activeSessionIndex < _sessions.length
-          ? _sessions[_activeSessionIndex]
-          : null;
+      ? _sessions[_activeSessionIndex]
+      : null;
+  bool get syncInput => _syncInput;
+
+  void setSyncInput(bool enabled) {
+    _syncInput = enabled;
+  }
 
   /// 添加 SSH 会话
   Future<SessionInfo> addSshSession({
@@ -106,6 +119,30 @@ class SessionManager {
     return info;
   }
 
+  /// 接管已经由后台 Isolate 建立的 SSH 会话。
+  SessionInfo addExistingSshSession({
+    required int sessionId,
+    required String name,
+    Map<String, Object?>? profileConfig,
+  }) {
+    final session = _core.attachSession(sessionId);
+    final info = SessionInfo(
+      id: session.id,
+      name: name,
+      type: SessionType.ssh,
+      session: session,
+      profileConfig: profileConfig,
+      state: session.getState(),
+    );
+
+    _sessions.add(info);
+    _notifySessionsChanged();
+    if (_sessions.length == 1) {
+      setActiveSession(0);
+    }
+    return info;
+  }
+
   /// 添加本地 Shell 会话
   SessionInfo addLocalShellSession({
     required String name,
@@ -113,7 +150,11 @@ class SessionManager {
     String? workingDir,
   }) {
     final session = _core.openLocalShell(
-      shell: shell ?? (Platform.isWindows ? 'cmd.exe' : '/bin/bash'),
+      shell:
+          shell ??
+          (Platform.isWindows
+              ? (Platform.environment['COMSPEC'] ?? 'cmd.exe')
+              : (Platform.environment['SHELL'] ?? '/bin/sh')),
       workingDir: workingDir,
     );
 
@@ -122,6 +163,10 @@ class SessionManager {
       name: name,
       type: SessionType.localShell,
       session: session,
+      profileConfig: <String, Object?>{
+        'shell': shell,
+        'workingDir': workingDir,
+      },
       state: 'running',
     );
 
@@ -136,16 +181,66 @@ class SessionManager {
     return info;
   }
 
+  SessionInfo addTelnetSession({
+    required String name,
+    required TelnetConfig config,
+  }) {
+    return _addProtocolSession(
+      name: name,
+      type: SessionType.telnet,
+      request: <String, Object?>{'type': 'telnet', 'config': config.toJson()},
+    );
+  }
+
+  SessionInfo addRawTcpSession({
+    required String name,
+    required RawTcpConfig config,
+  }) {
+    return _addProtocolSession(
+      name: name,
+      type: SessionType.rawTcp,
+      request: <String, Object?>{'type': 'raw_tcp', 'config': config.toJson()},
+    );
+  }
+
+  SessionInfo addSerialSession({
+    required String name,
+    required SerialConfig config,
+  }) {
+    return _addProtocolSession(
+      name: name,
+      type: SessionType.serial,
+      request: <String, Object?>{'type': 'serial', 'config': config.toJson()},
+    );
+  }
+
+  SessionInfo _addProtocolSession({
+    required String name,
+    required SessionType type,
+    required Map<String, Object?> request,
+  }) {
+    final session = _core.openProtocol(request);
+    final info = SessionInfo(
+      id: session.id,
+      name: name,
+      type: type,
+      session: session,
+      state: session.getState(),
+    );
+    _sessions.add(info);
+    _notifySessionsChanged();
+    if (_sessions.length == 1) {
+      setActiveSession(0);
+    }
+    return info;
+  }
+
   /// 移除会话
   void removeSession(int index) {
     if (index < 0 || index >= _sessions.length) return;
 
     final session = _sessions[index];
-    if (session.type == SessionType.ssh) {
-      (session.session as SshSession).close();
-    } else {
-      (session.session as LocalShellSession).close();
-    }
+    _closeSession(session);
 
     _sessions.removeAt(index);
 
@@ -165,27 +260,47 @@ class SessionManager {
     _notifyActiveSessionChanged();
   }
 
+  void updateProfileConfig(int index, Map<String, Object?> profileConfig) {
+    if (index < 0 || index >= _sessions.length) return;
+    _sessions[index] = _sessions[index].copyWith(profileConfig: profileConfig);
+    _notifySessionsChanged();
+  }
+
   /// 发送输入到活动会话
   void writeInput(String data) {
-    final session = activeSession;
-    if (session == null) return;
-
-    if (session.type == SessionType.ssh) {
-      (session.session as SshSession).writeInput(data);
-    } else {
-      (session.session as LocalShellSession).writeInput(data);
+    final current = activeSession;
+    if (current == null) return;
+    final targets = _syncInput ? _sessions : <SessionInfo>[current];
+    for (final session in targets) {
+      switch (session.type) {
+        case SessionType.ssh:
+          (session.session as SshSession).writeInput(data);
+        case SessionType.localShell:
+          (session.session as LocalShellSession).writeInput(data);
+        case SessionType.telnet:
+        case SessionType.rawTcp:
+        case SessionType.serial:
+          (session.session as ProtocolSession).writeInput(data);
+      }
     }
   }
 
   /// 发送原始字节到活动会话
   void writeBytes(Uint8List bytes) {
-    final session = activeSession;
-    if (session == null) return;
-
-    if (session.type == SessionType.ssh) {
-      (session.session as SshSession).writeBytes(bytes);
-    } else {
-      (session.session as LocalShellSession).writeBytes(bytes);
+    final current = activeSession;
+    if (current == null) return;
+    final targets = _syncInput ? _sessions : <SessionInfo>[current];
+    for (final session in targets) {
+      switch (session.type) {
+        case SessionType.ssh:
+          (session.session as SshSession).writeBytes(bytes);
+        case SessionType.localShell:
+          (session.session as LocalShellSession).writeBytes(bytes);
+        case SessionType.telnet:
+        case SessionType.rawTcp:
+        case SessionType.serial:
+          (session.session as ProtocolSession).writeBytes(bytes);
+      }
     }
   }
 
@@ -202,16 +317,39 @@ class SessionManager {
     final session = activeSession;
     if (session == null) return;
 
-    if (session.type == SessionType.ssh) {
-      (session.session as SshSession).sendMouseEvent(
-        eventType: eventType,
-        button: button,
-        col: col,
-        row: row,
-        shift: shift,
-        meta: meta,
-        ctrl: ctrl,
-      );
+    switch (session.type) {
+      case SessionType.ssh:
+        (session.session as SshSession).sendMouseEvent(
+          eventType: eventType,
+          button: button,
+          col: col,
+          row: row,
+          shift: shift,
+          meta: meta,
+          ctrl: ctrl,
+        );
+      case SessionType.localShell:
+        (session.session as LocalShellSession).sendMouseEvent(
+          eventType: eventType,
+          button: button,
+          col: col,
+          row: row,
+          shift: shift,
+          meta: meta,
+          ctrl: ctrl,
+        );
+      case SessionType.telnet:
+      case SessionType.rawTcp:
+      case SessionType.serial:
+        (session.session as ProtocolSession).sendMouseEvent(
+          eventType: eventType,
+          button: button,
+          col: col,
+          row: row,
+          shift: shift,
+          meta: meta,
+          ctrl: ctrl,
+        );
     }
   }
 
@@ -220,11 +358,25 @@ class SessionManager {
     final session = activeSession;
     if (session == null) return;
 
-    if (session.type == SessionType.ssh) {
-      (session.session as SshSession).resize(cols, rows);
-    } else {
-      (session.session as LocalShellSession).resize(cols, rows);
+    switch (session.type) {
+      case SessionType.ssh:
+        (session.session as SshSession).resize(cols, rows);
+      case SessionType.localShell:
+        (session.session as LocalShellSession).resize(cols, rows);
+      case SessionType.telnet:
+      case SessionType.rawTcp:
+      case SessionType.serial:
+        (session.session as ProtocolSession).resize(cols, rows);
     }
+  }
+
+  void resizeSession(int sessionId, int cols, int rows) {
+    final index = _sessions.indexWhere((session) => session.id == sessionId);
+    if (index < 0) return;
+    final previous = _activeSessionIndex;
+    _activeSessionIndex = index;
+    resize(cols, rows);
+    _activeSessionIndex = previous;
   }
 
   /// 尝试重新连接活动会话
@@ -258,14 +410,32 @@ class SessionManager {
       final session = _sessions[i];
       TerminalSnapshot? snapshot;
 
-      if (session.type == SessionType.ssh) {
-        snapshot = (session.session as SshSession).readOutput();
-      } else {
-        snapshot = (session.session as LocalShellSession).readOutput();
+      switch (session.type) {
+        case SessionType.ssh:
+          final ssh = session.session as SshSession;
+          snapshot = ssh.readOutput();
+          final state = ssh.getState();
+          if (state != session.state) {
+            _sessions[i] = session.copyWith(state: state);
+            _notifySessionsChanged();
+          }
+          if (state == 'disconnected' &&
+              session.profileConfig?['autoReconnect'] == true &&
+              ssh.canReconnect()) {
+            onReconnectRequired?.call(_sessions[i]);
+          }
+        case SessionType.localShell:
+          snapshot = (session.session as LocalShellSession).readOutput();
+        case SessionType.telnet:
+        case SessionType.rawTcp:
+        case SessionType.serial:
+          snapshot = (session.session as ProtocolSession).readOutput();
       }
 
       if (snapshot != null) {
-        _sessions[i] = session.copyWith(snapshot: snapshot);
+        final updated = _sessions[i].copyWith(snapshot: snapshot);
+        _sessions[i] = updated;
+        onSessionOutput?.call(updated, snapshot);
 
         // 如果是活动会话，通知更新
         if (i == _activeSessionIndex) {
@@ -289,12 +459,21 @@ class SessionManager {
   void dispose() {
     stopPolling();
     for (final session in _sessions) {
-      if (session.type == SessionType.ssh) {
-        (session.session as SshSession).close();
-      } else {
-        (session.session as LocalShellSession).close();
-      }
+      _closeSession(session);
     }
     _sessions.clear();
+  }
+
+  void _closeSession(SessionInfo session) {
+    switch (session.type) {
+      case SessionType.ssh:
+        (session.session as SshSession).close();
+      case SessionType.localShell:
+        (session.session as LocalShellSession).close();
+      case SessionType.telnet:
+      case SessionType.rawTcp:
+      case SessionType.serial:
+        (session.session as ProtocolSession).close();
+    }
   }
 }

@@ -3,10 +3,11 @@ use std::net::TcpStream;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::protocol::RawTcpConfig;
+use crate::protocol::{apply_newline, decode_to_utf8, encode_from_utf8, RawTcpConfig};
 
 /// Raw TCP 会话状态
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum RawTcpState {
     Created,
     Connecting,
@@ -16,6 +17,7 @@ pub enum RawTcpState {
 }
 
 /// Raw TCP 会话
+#[allow(dead_code)]
 pub struct RawTcpSession {
     id: u64,
     config: RawTcpConfig,
@@ -27,6 +29,7 @@ pub struct RawTcpSession {
     last_activity: Instant,
 }
 
+#[allow(dead_code)]
 impl RawTcpSession {
     pub fn new(id: u64, config: RawTcpConfig) -> Self {
         Self {
@@ -62,12 +65,13 @@ impl RawTcpSession {
         self.state = RawTcpState::Connecting;
 
         let addr = format!("{}:{}", self.config.host, self.config.port);
-        let stream = TcpStream::connect(&addr)
-            .map_err(|e| format!("TCP 连接失败: {}", e))?;
+        let stream = TcpStream::connect(&addr).map_err(|e| format!("TCP 连接失败: {}", e))?;
 
-        stream.set_read_timeout(Some(Duration::from_secs(30)))
-            .map_err(|e| format!("设置读超时失败: {}", e))?;
-        stream.set_write_timeout(Some(Duration::from_secs(30)))
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| format!("设置非阻塞模式失败: {}", e))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
             .map_err(|e| format!("设置写超时失败: {}", e))?;
 
         self.stream = Some(stream);
@@ -87,7 +91,7 @@ impl RawTcpSession {
                 match stream.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        output.extend_from_slice(&buf[..n]);
+                        output.extend_from_slice(&decode_to_utf8(&buf[..n], &self.config.encoding));
                         self.last_activity = Instant::now();
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -103,10 +107,14 @@ impl RawTcpSession {
     /// 发送输入数据
     pub fn write_input(&mut self, data: &[u8]) -> Result<(), String> {
         if let Some(stream) = &mut self.stream {
-            stream.write_all(data)
+            let encoded = encode_from_utf8(
+                &apply_newline(data, &self.config.newline),
+                &self.config.encoding,
+            );
+            stream
+                .write_all(&encoded)
                 .map_err(|e| format!("写入失败: {}", e))?;
-            stream.flush()
-                .map_err(|e| format!("刷新失败: {}", e))?;
+            stream.flush().map_err(|e| format!("刷新失败: {}", e))?;
             self.last_activity = Instant::now();
             Ok(())
         } else {

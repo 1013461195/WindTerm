@@ -1,11 +1,5 @@
 /// 协议类型
-enum ProtocolType {
-  ssh,
-  telnet,
-  serial,
-  rawTcp,
-  localShell,
-}
+enum ProtocolType { ssh, telnet, serial, rawTcp, localShell }
 
 /// Telnet 配置
 class TelnetConfig {
@@ -17,6 +11,7 @@ class TelnetConfig {
   final bool sga; // Suppress Go Ahead
   final bool binary;
   final String encoding;
+  final String newline;
 
   const TelnetConfig({
     required this.host,
@@ -27,6 +22,7 @@ class TelnetConfig {
     this.sga = true,
     this.binary = false,
     this.encoding = 'utf-8',
+    this.newline = 'CRLF',
   });
 
   Map<String, dynamic> toJson() {
@@ -39,6 +35,7 @@ class TelnetConfig {
       'sga': sga,
       'binary': binary,
       'encoding': encoding,
+      'newline': newline,
     };
   }
 
@@ -52,40 +49,22 @@ class TelnetConfig {
       sga: json['sga'] ?? true,
       binary: json['binary'] ?? false,
       encoding: json['encoding'] ?? 'utf-8',
+      newline: json['newline'] ?? 'CRLF',
     );
   }
 }
 
 /// 串口数据位
-enum SerialDataBits {
-  five,
-  six,
-  seven,
-  eight,
-}
+enum SerialDataBits { five, six, seven, eight }
 
 /// 串口校验位
-enum SerialParity {
-  none,
-  odd,
-  even,
-  mark,
-  space,
-}
+enum SerialParity { none, odd, even, mark, space }
 
 /// 串口停止位
-enum SerialStopBits {
-  one,
-  onePointFive,
-  two,
-}
+enum SerialStopBits { one, onePointFive, two }
 
 /// 串口流控
-enum SerialFlowControl {
-  none,
-  hardware,
-  software,
-}
+enum SerialFlowControl { none, hardware, software }
 
 /// Serial 配置
 class SerialConfig {
@@ -97,6 +76,8 @@ class SerialConfig {
   final SerialFlowControl flowControl;
   final bool dtr;
   final bool rts;
+  final String encoding;
+  final String newline;
 
   const SerialConfig({
     required this.port,
@@ -107,27 +88,31 @@ class SerialConfig {
     this.flowControl = SerialFlowControl.none,
     this.dtr = true,
     this.rts = true,
+    this.encoding = 'utf-8',
+    this.newline = 'CRLF',
   });
 
   Map<String, dynamic> toJson() {
     return {
       'port': port,
-      'baudRate': baudRate,
-      'dataBits': dataBits.name,
+      'baud_rate': baudRate,
+      'data_bits': dataBits.name,
       'parity': parity.name,
-      'stopBits': stopBits.name,
-      'flowControl': flowControl.name,
+      'stop_bits': stopBits.name,
+      'flow_control': flowControl.name,
       'dtr': dtr,
       'rts': rts,
+      'encoding': encoding,
+      'newline': newline,
     };
   }
 
   factory SerialConfig.fromJson(Map<String, dynamic> json) {
     return SerialConfig(
       port: json['port'] ?? '',
-      baudRate: json['baudRate'] ?? 9600,
+      baudRate: json['baud_rate'] ?? json['baudRate'] ?? 9600,
       dataBits: SerialDataBits.values.firstWhere(
-        (e) => e.name == json['dataBits'],
+        (e) => e.name == (json['data_bits'] ?? json['dataBits']),
         orElse: () => SerialDataBits.eight,
       ),
       parity: SerialParity.values.firstWhere(
@@ -135,15 +120,17 @@ class SerialConfig {
         orElse: () => SerialParity.none,
       ),
       stopBits: SerialStopBits.values.firstWhere(
-        (e) => e.name == json['stopBits'],
+        (e) => e.name == (json['stop_bits'] ?? json['stopBits']),
         orElse: () => SerialStopBits.one,
       ),
       flowControl: SerialFlowControl.values.firstWhere(
-        (e) => e.name == json['flowControl'],
+        (e) => e.name == (json['flow_control'] ?? json['flowControl']),
         orElse: () => SerialFlowControl.none,
       ),
       dtr: json['dtr'] ?? true,
       rts: json['rts'] ?? true,
+      encoding: json['encoding'] ?? 'utf-8',
+      newline: json['newline'] ?? 'CRLF',
     );
   }
 
@@ -153,28 +140,40 @@ class SerialConfig {
 
   String _dataBitsString() {
     switch (dataBits) {
-      case SerialDataBits.five: return '5';
-      case SerialDataBits.six: return '6';
-      case SerialDataBits.seven: return '7';
-      case SerialDataBits.eight: return '8';
+      case SerialDataBits.five:
+        return '5';
+      case SerialDataBits.six:
+        return '6';
+      case SerialDataBits.seven:
+        return '7';
+      case SerialDataBits.eight:
+        return '8';
     }
   }
 
   String _parityString() {
     switch (parity) {
-      case SerialParity.none: return 'N';
-      case SerialParity.odd: return 'O';
-      case SerialParity.even: return 'E';
-      case SerialParity.mark: return 'M';
-      case SerialParity.space: return 'S';
+      case SerialParity.none:
+        return 'N';
+      case SerialParity.odd:
+        return 'O';
+      case SerialParity.even:
+        return 'E';
+      case SerialParity.mark:
+        return 'M';
+      case SerialParity.space:
+        return 'S';
     }
   }
 
   String _stopBitsString() {
     switch (stopBits) {
-      case SerialStopBits.one: return '1';
-      case SerialStopBits.onePointFive: return '1.5';
-      case SerialStopBits.two: return '2';
+      case SerialStopBits.one:
+        return '1';
+      case SerialStopBits.onePointFive:
+        return '1.5';
+      case SerialStopBits.two:
+        return '2';
     }
   }
 }

@@ -1,7 +1,10 @@
 #include "flutter_window.h"
 
+#include <algorithm>
 #include <optional>
+#include <variant>
 
+#include <flutter/standard_method_codec.h>
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -25,6 +28,29 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "wind_send/window",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        if (call.method_name() != "setOpacity") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* opacity = std::get_if<double>(call.arguments());
+        if (opacity == nullptr) {
+          result->Error("invalid_argument", "Opacity must be a double");
+          return;
+        }
+        const double clamped = std::max(0.35, std::min(1.0, *opacity));
+        const HWND window = GetHandle();
+        LONG_PTR style = GetWindowLongPtr(window, GWL_EXSTYLE);
+        SetWindowLongPtr(window, GWL_EXSTYLE, style | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(
+            window, 0, static_cast<BYTE>(clamped * 255.0), LWA_ALPHA);
+        result->Success();
+      });
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -41,6 +67,7 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
+    window_channel_.reset();
     flutter_controller_ = nullptr;
   }
 

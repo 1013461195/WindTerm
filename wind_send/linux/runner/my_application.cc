@@ -14,6 +14,30 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
+static void window_method_call_cb(FlMethodChannel* channel,
+                                  FlMethodCall* method_call,
+                                  gpointer user_data) {
+  GtkWidget* window = GTK_WIDGET(user_data);
+  const gchar* method = fl_method_call_get_name(method_call);
+  if (strcmp(method, "setOpacity") != 0) {
+    fl_method_call_respond_not_implemented(method_call, nullptr);
+    return;
+  }
+  FlValue* args = fl_method_call_get_args(method_call);
+  if (args == nullptr || fl_value_get_type(args) != FL_VALUE_TYPE_FLOAT) {
+    g_autoptr(FlMethodErrorResponse) response = fl_method_error_response_new(
+        "invalid_argument", "Opacity must be a double", nullptr);
+    fl_method_call_respond(method_call, FL_METHOD_RESPONSE(response), nullptr);
+    return;
+  }
+  const double opacity =
+      CLAMP(fl_value_get_float(args), 0.35, 1.0);
+  gtk_widget_set_opacity(window, opacity);
+  g_autoptr(FlMethodSuccessResponse) response =
+      fl_method_success_response_new(nullptr);
+  fl_method_call_respond(method_call, FL_METHOD_RESPONSE(response), nullptr);
+}
+
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
@@ -74,6 +98,15 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  FlBinaryMessenger* messenger =
+      fl_engine_get_binary_messenger(fl_view_get_engine(view));
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  FlMethodChannel* window_channel = fl_method_channel_new(
+      messenger, "wind_send/window", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(
+      window_channel, window_method_call_cb, window, nullptr);
+  g_object_set_data_full(
+      G_OBJECT(window), "wind-send-window-channel", window_channel, g_object_unref);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

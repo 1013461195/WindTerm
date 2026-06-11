@@ -43,12 +43,7 @@ class _SettingsPageState extends State<SettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _buildSection(
-            title: '主题',
-            children: [
-              _buildThemeSelector(),
-            ],
-          ),
+          _buildSection(title: '主题', children: [_buildThemeSelector()]),
           const SizedBox(height: 16),
           _buildSection(
             title: '字体',
@@ -84,6 +79,8 @@ class _SettingsPageState extends State<SettingsPage> {
             title: '高级',
             children: [
               _buildCellSizeSliders(),
+              const SizedBox(height: 16),
+              _buildOpacitySlider(),
             ],
           ),
         ],
@@ -128,7 +125,9 @@ class _SettingsPageState extends State<SettingsPage> {
           title: Text(
             theme.displayName,
             style: TextStyle(
-              color: isSelected ? const Color(0xff2f6fed) : const Color(0xffd7e0ee),
+              color: isSelected
+                  ? const Color(0xff2f6fed)
+                  : const Color(0xffd7e0ee),
             ),
           ),
           leading: Container(
@@ -144,13 +143,15 @@ class _SettingsPageState extends State<SettingsPage> {
               ? const Icon(Icons.check_rounded, color: Color(0xff2f6fed))
               : null,
           onTap: () {
-            _updateSettings(_settings.copyWith(
-              themeName: theme.name,
-              backgroundColor: theme.background,
-              foregroundColor: theme.foreground,
-              cursorColor: theme.cursor,
-              selectionColor: theme.selection,
-            ));
+            _updateSettings(
+              _settings.copyWith(
+                themeName: theme.name,
+                backgroundColor: theme.background,
+                foregroundColor: theme.foreground,
+                cursorColor: theme.cursor,
+                selectionColor: theme.selection,
+              ),
+            );
           },
         );
       }).toList(),
@@ -160,10 +161,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _buildFontSizeSlider() {
     return Row(
       children: [
-        const Text(
-          '字号',
-          style: TextStyle(color: Color(0xff8e98a8)),
-        ),
+        const Text('字号', style: TextStyle(color: Color(0xff8e98a8))),
         Expanded(
           child: Slider(
             value: _settings.fontSize,
@@ -186,13 +184,16 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 
   Widget _buildFontFamilySelector() {
-    final fonts = ['Menlo', 'Consolas', 'Courier New', 'Monaco', 'DejaVu Sans Mono'];
+    final fonts = [
+      'Menlo',
+      'Consolas',
+      'Courier New',
+      'Monaco',
+      'DejaVu Sans Mono',
+    ];
     return Row(
       children: [
-        const Text(
-          '字体',
-          style: TextStyle(color: Color(0xff8e98a8)),
-        ),
+        const Text('字体', style: TextStyle(color: Color(0xff8e98a8))),
         const SizedBox(width: 16),
         Expanded(
           child: DropdownButton<String>(
@@ -201,10 +202,7 @@ class _SettingsPageState extends State<SettingsPage> {
             dropdownColor: const Color(0xff191d25),
             style: const TextStyle(color: Color(0xffd7e0ee)),
             items: fonts.map((font) {
-              return DropdownMenuItem(
-                value: font,
-                child: Text(font),
-              );
+              return DropdownMenuItem(value: font, child: Text(font));
             }).toList(),
             onChanged: (value) {
               if (value != null) {
@@ -224,10 +222,7 @@ class _SettingsPageState extends State<SettingsPage> {
   ) {
     return Row(
       children: [
-        Text(
-          label,
-          style: const TextStyle(color: Color(0xff8e98a8)),
-        ),
+        Text(label, style: const TextStyle(color: Color(0xff8e98a8))),
         const Spacer(),
         GestureDetector(
           onTap: () {
@@ -248,7 +243,10 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  void _showColorPicker(Color currentColor, void Function(Color color) onChanged) {
+  void _showColorPicker(
+    Color currentColor,
+    void Function(Color color) onChanged,
+  ) {
     // 简化的颜色选择器，实际应用中可以使用更完整的实现
     final colors = [
       const Color(0xff05070a),
@@ -307,10 +305,7 @@ class _SettingsPageState extends State<SettingsPage> {
       children: [
         Row(
           children: [
-            const Text(
-              '单元格宽度',
-              style: TextStyle(color: Color(0xff8e98a8)),
-            ),
+            const Text('单元格宽度', style: TextStyle(color: Color(0xff8e98a8))),
             Expanded(
               child: Slider(
                 value: _settings.cellWidth,
@@ -332,10 +327,7 @@ class _SettingsPageState extends State<SettingsPage> {
         ),
         Row(
           children: [
-            const Text(
-              '单元格高度',
-              style: TextStyle(color: Color(0xff8e98a8)),
-            ),
+            const Text('单元格高度', style: TextStyle(color: Color(0xff8e98a8))),
             Expanded(
               child: Slider(
                 value: _settings.cellHeight,
@@ -355,6 +347,27 @@ class _SettingsPageState extends State<SettingsPage> {
             ),
           ],
         ),
+      ],
+    );
+  }
+
+  Widget _buildOpacitySlider() {
+    return Row(
+      children: [
+        const Text('窗口透明度', style: TextStyle(color: Color(0xff8e98a8))),
+        Expanded(
+          child: Slider(
+            value: _settings.windowOpacity,
+            min: 0.35,
+            max: 1,
+            divisions: 13,
+            label: '${(_settings.windowOpacity * 100).round()}%',
+            onChanged: (value) {
+              _updateSettings(_settings.copyWith(windowOpacity: value));
+            },
+          ),
+        ),
+        Text('${(_settings.windowOpacity * 100).round()}%'),
       ],
     );
   }

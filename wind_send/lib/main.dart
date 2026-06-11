@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:isolate';
+import 'dart:ui';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
@@ -10,11 +11,14 @@ import 'package:flutter/services.dart';
 import 'core_bridge/rust_core.dart';
 import 'features/network/network_config.dart';
 import 'features/network/network_settings_page.dart';
+import 'features/protocol/protocol_session_editor.dart';
 import 'features/security/security_config.dart';
 import 'features/security/security_settings_page.dart';
 import 'features/session/session_editor.dart';
 import 'features/session/session_manager.dart';
+import 'features/session/session_productivity.dart';
 import 'features/session/session_profile.dart';
+import 'features/session/session_profile_editor.dart';
 import 'features/session/session_tree.dart';
 import 'features/session/command_palette.dart';
 import 'features/sftp/sftp_panel.dart';
@@ -23,34 +27,23 @@ import 'features/settings/terminal_settings.dart';
 import 'features/terminal/terminal_painter.dart';
 import 'features/terminal/terminal_input.dart';
 import 'features/terminal/terminal_search.dart';
+import 'features/update/update_service.dart';
 
 // ── FFI 类型签名（与 rust_core.dart 保持一致） ──
 
-typedef _SessionOpenNative =
-    Uint64 Function(
-      Pointer<Utf8Char> host,
-      Uint16 port,
-      Pointer<Utf8Char> username,
-      Pointer<Utf8Char> password,
-    );
-typedef _SessionOpenDart =
-    int Function(
-      Pointer<Utf8Char> host,
-      int port,
-      Pointer<Utf8Char> username,
-      Pointer<Utf8Char> password,
-    );
-
-typedef _StringFreeNative = Void Function(Pointer<Utf8Char>);
-typedef _StringFreeDart = void Function(Pointer<Utf8Char>);
+typedef _SessionOpenJsonNative = Uint64 Function(Pointer<Utf8Char> requestJson);
+typedef _SessionOpenJsonDart = int Function(Pointer<Utf8Char> requestJson);
+typedef _SessionReconnectNative = Int32 Function(Uint64 sessionId);
+typedef _SessionReconnectDart = int Function(int sessionId);
+typedef _LastOpenErrorNative = Pointer<Utf8Char> Function();
+typedef _LastOpenErrorDart = Pointer<Utf8Char> Function();
+typedef _StringFreeNative = Void Function(Pointer<Utf8Char> value);
+typedef _StringFreeDart = void Function(Pointer<Utf8Char> value);
 
 /// 在后台 Isolate 中执行阻塞的 SSH 连接
-Future<int> _openSessionIsolate(
+Future<(int, String?)> _openSessionIsolate(
   List<String> libCandidates,
-  String host,
-  int port,
-  String username,
-  String password,
+  String requestJson,
 ) {
   return Isolate.run(() {
     // 每个 Isolate 需要自行打开动态库
@@ -63,16 +56,19 @@ Future<int> _openSessionIsolate(
         continue;
       }
     }
-    if (lib == null) return 0;
+    if (lib == null) return (0, '无法加载 Rust Core 动态库');
 
     final sessionOpen = lib
-        .lookupFunction<_SessionOpenNative, _SessionOpenDart>(
-          'core_session_open',
+        .lookupFunction<_SessionOpenJsonNative, _SessionOpenJsonDart>(
+          'core_session_open_json',
+        );
+    final lastError = lib
+        .lookupFunction<_LastOpenErrorNative, _LastOpenErrorDart>(
+          'core_session_last_open_error',
         );
     final stringFree = lib.lookupFunction<_StringFreeNative, _StringFreeDart>(
       'core_string_free',
     );
-
     Pointer<Utf8Char> toUtf8(String s) {
       final units = utf8.encode(s);
       final p = malloc.allocate<Uint8>(units.length + 1).cast<Utf8Char>();
@@ -83,20 +79,60 @@ Future<int> _openSessionIsolate(
       return p;
     }
 
-    final h = toUtf8(host);
-    final u = toUtf8(username);
-    final pw = toUtf8(password);
+    final request = toUtf8(requestJson);
     try {
-      return sessionOpen(h, port, u, pw);
+      final id = sessionOpen(request);
+      if (id != 0) return (id, null);
+      final errorPointer = lastError();
+      if (errorPointer.address == 0) return (0, 'SSH 连接失败');
+      final bytes = <int>[];
+      for (var offset = 0; ; offset++) {
+        final value = (errorPointer.cast<Uint8>() + offset).value;
+        if (value == 0) break;
+        bytes.add(value);
+      }
+      final error = utf8.decode(bytes, allowMalformed: true);
+      stringFree(errorPointer);
+      return (0, error);
     } finally {
-      stringFree(h);
-      stringFree(u);
-      stringFree(pw);
+      malloc.free(request);
     }
   });
 }
 
+Future<int> _reconnectSessionIsolate(
+  List<String> libCandidates,
+  int sessionId,
+) {
+  return Isolate.run(() {
+    for (final path in libCandidates) {
+      try {
+        final library = DynamicLibrary.open(path);
+        final reconnect = library
+            .lookupFunction<_SessionReconnectNative, _SessionReconnectDart>(
+              'core_session_reconnect',
+            );
+        return reconnect(sessionId);
+      } on Object {
+        continue;
+      }
+    }
+    return -1;
+  });
+}
+
 void main() {
+  final crashReporter = CrashReporter(windSendDataDirectory());
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    unawaited(
+      crashReporter.record(details.exception, details.stack, source: 'flutter'),
+    );
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    unawaited(crashReporter.record(error, stack, source: 'platform'));
+    return true;
+  };
   runApp(const WindSendApp());
 }
 
@@ -129,6 +165,7 @@ class ShellWorkspace extends StatefulWidget {
 }
 
 class _ShellWorkspaceState extends State<ShellWorkspace> {
+  static const MethodChannel _windowChannel = MethodChannel('wind_send/window');
   final RustCore _core = RustCore.load();
   late final SessionManager _sessionManager;
   TerminalSnapshot? _snapshot;
@@ -143,39 +180,206 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   SearchResult? _searchResult;
   bool _showSftp = false;
   SftpSession? _sftpSession;
-  final SessionProfileStore _profileStore = SessionProfileStore('.');
+  final String _dataDirectory = windSendDataDirectory();
+  late final SessionProfileStore _profileStore;
+  late final WorkspaceStore _workspaceStore;
+  late final AppConfigStore _appConfigStore;
+  late final SessionLogWriter _sessionLogWriter;
   NetworkConfig _networkConfig = const NetworkConfig();
   SecurityConfig _securityConfig = const SecurityConfig();
+  late final AuditLogger _auditLogger;
+  late final CredentialStore _credentialStore;
+  late final UpdateService _updateService;
+  String? _masterPassword;
+  bool _restoringWorkspace = false;
+  final Set<int> _reconnectInFlight = {};
+  bool _splitPane = false;
+  bool _syncInput = false;
 
   @override
   void initState() {
     super.initState();
+    _profileStore = SessionProfileStore(_dataDirectory);
+    _workspaceStore = WorkspaceStore(_dataDirectory);
+    _appConfigStore = AppConfigStore(_dataDirectory);
+    _sessionLogWriter = SessionLogWriter(_dataDirectory);
+    _auditLogger = AuditLogger(_dataDirectory);
     _sessionManager = SessionManager(
       core: _core,
       onSessionsChanged: _onSessionsChanged,
       onActiveSessionChanged: _onActiveSessionChanged,
       onSnapshotUpdated: _onSnapshotUpdated,
+      onSessionOutput: (session, snapshot) {
+        unawaited(_sessionLogWriter.append(session, snapshot));
+      },
+      onReconnectRequired: (session) {
+        unawaited(_autoReconnect(session));
+      },
     );
+    _credentialStore = CredentialStore(
+      _core,
+      vaultDirectory: '$_dataDirectory/vault',
+    );
+    _updateService = UpdateService(_core, dataDirectory: _dataDirectory);
     _inputHandler = TerminalInputHandler(
       onInput: _handleInput,
       onCopy: _handleCopy,
       onPaste: _handlePaste,
     );
     _loadProfiles();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(_checkForUpdates(silent: true));
+    });
   }
 
   Future<void> _loadProfiles() async {
     try {
+      final settings = await _appConfigStore.load();
+      final terminal = settings['terminal'];
+      final security = settings['security'];
+      if (terminal is Map<String, dynamic>) {
+        _settings = TerminalSettings.fromJson(terminal);
+        unawaited(_applyWindowOpacity(_settings.windowOpacity));
+      }
+      if (security is Map<String, dynamic>) {
+        _securityConfig = SecurityConfig.fromJson(security);
+        _auditLogger.configure(_securityConfig);
+      }
       await _profileStore.load();
+      await _restoreWorkspace();
       setState(() {});
     } catch (e) {
       // 忽略加载错误
     }
   }
 
+  Future<void> _saveAppConfig() {
+    return _appConfigStore.save(<String, Object?>{
+      'terminal': _settings.toJson(),
+      'security': _securityConfig.toJson(),
+    });
+  }
+
+  Future<void> _applyWindowOpacity(double opacity) async {
+    try {
+      await _windowChannel.invokeMethod<void>('setOpacity', opacity);
+    } on MissingPluginException {
+      // Tests and unsupported platforms do not expose a native window channel.
+    }
+  }
+
+  Future<void> _checkForUpdates({required bool silent}) async {
+    if (!_updateService.configured) {
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('当前构建未配置签名更新源')));
+      }
+      return;
+    }
+    try {
+      final update = await _updateService.check();
+      if (!mounted) return;
+      if (update == null) {
+        if (!silent) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('当前已是最新版本')));
+        }
+        return;
+      }
+      final install = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('发现 WindSend ${update.version}'),
+          content: SingleChildScrollView(
+            child: Text(update.notes.isEmpty ? '已验证更新清单签名。' : update.notes),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('稍后'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('下载'),
+            ),
+          ],
+        ),
+      );
+      if (install != true) return;
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('正在下载并校验更新包...')));
+      }
+      final installer = await _updateService.download(update);
+      await _updateService.openInstaller(installer);
+    } on Object catch (error) {
+      unawaited(
+        _auditLogger.write(action: 'update_failed', detail: error.toString()),
+      );
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('检查更新失败: $error')));
+      }
+    }
+  }
+
+  Future<void> _autoReconnect(SessionInfo session) async {
+    if (!_reconnectInFlight.add(session.id)) return;
+    try {
+      final result = await _reconnectSessionIsolate(
+        RustCore.libraryCandidates(),
+        session.id,
+      );
+      if (result == 0 && _lastCols > 0 && _lastRows > 0) {
+        _sessionManager.resizeSession(session.id, _lastCols, _lastRows);
+      }
+    } finally {
+      _reconnectInFlight.remove(session.id);
+    }
+  }
+
+  Future<void> _restoreWorkspace() async {
+    final workspace = await _workspaceStore.load();
+    _restoringWorkspace = true;
+    try {
+      for (final shell in workspace.localShells) {
+        _sessionManager.addLocalShellSession(
+          name: shell['name'] as String? ?? '本地 Shell',
+          shell: shell['shell'] as String?,
+          workingDir: shell['workingDir'] as String?,
+        );
+      }
+      for (final profileId in workspace.profileIds) {
+        final profile = _profileStore.get(profileId);
+        if (profile?.autoLogin == true) {
+          await _connectFromProfile(profile!);
+        }
+      }
+      if (_sessionManager.sessions.isNotEmpty) {
+        final index = workspace.activeIndex.clamp(
+          0,
+          _sessionManager.sessions.length - 1,
+        );
+        _sessionManager.setActiveSession(index);
+        _sessionManager.startPolling();
+      }
+    } finally {
+      _restoringWorkspace = false;
+      await _workspaceStore.save(
+        _sessionManager.sessions,
+        _sessionManager.activeSessionIndex,
+      );
+    }
+  }
+
   @override
   void dispose() {
     _sessionManager.dispose();
+    unawaited(_sessionLogWriter.dispose());
     _focusNode.dispose();
     super.dispose();
   }
@@ -188,6 +392,17 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     final text = _selectedText;
     if (text != null && text.isNotEmpty) {
       Clipboard.setData(ClipboardData(text: text));
+      if (_securityConfig.clipboardAutoClear) {
+        Timer(
+          Duration(seconds: _securityConfig.clipboardAutoClearSeconds),
+          () async {
+            final current = await Clipboard.getData(Clipboard.kTextPlain);
+            if (current?.text == text) {
+              await Clipboard.setData(const ClipboardData(text: ''));
+            }
+          },
+        );
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('已复制到剪贴板'),
@@ -197,10 +412,82 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     }
   }
 
-  void _handlePaste() async {
+  Future<void> _handlePaste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (data?.text != null) {
-      _sessionManager.writeInput(data!.text!);
+    final text = data?.text;
+    if (text == null || text.isEmpty) return;
+    if (!mounted) return;
+    var slowPaste = false;
+    var delayMs = 20;
+    if (_securityConfig.pasteConfirmation &&
+        (text.length >= 200 || text.contains('\n') || text.contains('\r'))) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('确认粘贴'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('即将向会话发送 ${text.length} 个字符。'),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('慢速粘贴'),
+                  subtitle: const Text('逐字符发送，降低设备或远端程序丢字符风险'),
+                  value: slowPaste,
+                  onChanged: (value) {
+                    setDialogState(() => slowPaste = value);
+                  },
+                ),
+                if (slowPaste)
+                  DropdownButtonFormField<int>(
+                    initialValue: delayMs,
+                    decoration: const InputDecoration(labelText: '字符间隔'),
+                    items: const [
+                      DropdownMenuItem(value: 10, child: Text('10 ms')),
+                      DropdownMenuItem(value: 20, child: Text('20 ms')),
+                      DropdownMenuItem(value: 50, child: Text('50 ms')),
+                      DropdownMenuItem(value: 100, child: Text('100 ms')),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) {
+                        setDialogState(() => delayMs = value);
+                      }
+                    },
+                  ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('粘贴'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    if (!slowPaste) {
+      _sessionManager.writeInput(
+        _snapshot?.bracketedPaste == true ? '\x1b[200~$text\x1b[201~' : text,
+      );
+      return;
+    }
+    if (_snapshot?.bracketedPaste == true) {
+      _sessionManager.writeInput('\x1b[200~');
+    }
+    for (final character in text.runes) {
+      if (!mounted || _sessionManager.activeSession == null) return;
+      _sessionManager.writeInput(String.fromCharCode(character));
+      await Future<void>.delayed(Duration(milliseconds: delayMs));
+    }
+    if (_snapshot?.bracketedPaste == true) {
+      _sessionManager.writeInput('\x1b[201~');
     }
   }
 
@@ -229,16 +516,35 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   }
 
   void _onSessionsChanged(List<SessionInfo> sessions) {
+    if (sessions.length < 2 && (_splitPane || _syncInput)) {
+      _splitPane = false;
+      _syncInput = false;
+      _sessionManager.setSyncInput(false);
+    }
     setState(() {});
+    if (!_restoringWorkspace) {
+      unawaited(
+        _workspaceStore.save(sessions, _sessionManager.activeSessionIndex),
+      );
+    }
   }
 
   void _onActiveSessionChanged(int activeIndex) {
     setState(() {
       _snapshot = _sessionManager.activeSession?.snapshot;
     });
+    if (!_restoringWorkspace) {
+      unawaited(
+        _workspaceStore.save(
+          _sessionManager.sessions,
+          _sessionManager.activeSessionIndex,
+        ),
+      );
+    }
   }
 
   void _onSnapshotUpdated(TerminalSnapshot snapshot) {
+    _inputHandler.applicationCursorMode = snapshot.applicationCursorMode;
     setState(() {
       _snapshot = snapshot;
     });
@@ -256,53 +562,152 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
-  /// 终端区域大小变化时，计算新的行列数并通知 Rust 调整 PTY 大小
-  void _onTerminalResize(double width, double height) {
-    // 与 terminal_painter.dart 中的常量保持一致
-    const cellWidth = 8.0;
-    const cellHeight = 16.0;
-    const leftPadding = 4.0;
-    const topPadding = 4.0;
+  void _openProtocolSessionEditor() {
+    showDialog<void>(
+      context: context,
+      builder: (context) => ProtocolSessionEditor(
+        serialPorts: _core.serialListPorts(),
+        onTelnet: (config) {
+          Navigator.of(context).pop();
+          _sessionManager.addTelnetSession(
+            name: 'Telnet ${config.host}:${config.port}',
+            config: config,
+          );
+          _afterProtocolConnected();
+        },
+        onRawTcp: (config) {
+          Navigator.of(context).pop();
+          _sessionManager.addRawTcpSession(
+            name: 'TCP ${config.host}:${config.port}',
+            config: config,
+          );
+          _afterProtocolConnected();
+        },
+        onSerial: (config) {
+          Navigator.of(context).pop();
+          _sessionManager.addSerialSession(
+            name: 'Serial ${config.port}',
+            config: config,
+          );
+          _afterProtocolConnected();
+        },
+      ),
+    );
+  }
 
-    final cols = ((width - leftPadding * 2) / cellWidth).floor();
-    final rows = ((height - topPadding * 2) / cellHeight).floor();
-
-    if (cols > 0 && rows > 0 && (cols != _lastCols || rows != _lastRows)) {
-      _lastCols = cols;
-      _lastRows = rows;
-      _sessionManager.resize(cols, rows);
+  void _afterProtocolConnected() {
+    _sessionManager.startPolling();
+    _focusNode.requestFocus();
+    if (_lastCols > 0 && _lastRows > 0) {
+      _sessionManager.resize(_lastCols, _lastRows);
     }
   }
 
-  Future<void> _connect(SshConfig config) async {
+  Future<void> _connect(SshConfig config, {SessionProfile? profile}) async {
+    if (config.rememberCredential &&
+        _securityConfig.credentialStorage == CredentialStorage.vault &&
+        await _ensureMasterPassword() == null) {
+      return;
+    }
     setState(() => _connecting = true);
 
     try {
       // 在后台 Isolate 执行阻塞的 SSH 连接，避免冻结 UI
       // 设置 15 秒超时
-      final sessionId =
+      final openResult =
           await _openSessionIsolate(
             RustCore.libraryCandidates(),
-            config.host,
-            config.port,
-            config.username,
-            config.password,
+            jsonEncode(config.toJson(network: _networkConfig.toJson())),
           ).timeout(
             const Duration(seconds: 15),
             onTimeout: () => throw TimeoutException('连接超时 (15秒)'),
           );
+      final sessionId = openResult.$1;
 
       if (sessionId == 0) {
-        throw Exception('连接失败: 返回会话 ID 为 0');
+        final error = openResult.$2 ?? '未知连接错误';
+        if (error.startsWith('HOST_KEY_UNKNOWN:') && mounted) {
+          final accepted = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (context) => AlertDialog(
+              title: const Text('确认未知主机密钥'),
+              content: SelectableText(error),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text('拒绝'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text('接受并保存'),
+                ),
+              ],
+            ),
+          );
+          if (accepted == true) {
+            setState(() => _connecting = false);
+            config.acceptUnknownHost = true;
+            await _connect(config, profile: profile);
+            return;
+          }
+        }
+        throw Exception(error);
       }
 
-      // 添加到会话管理器
-      await _sessionManager.addSshSession(
+      // 接管后台 Isolate 已经建立的会话，避免重复连接和泄漏。
+      String? credentialId;
+      if (config.rememberCredential &&
+          _securityConfig.credentialStorage != CredentialStorage.none) {
+        final secret = config.authentication == SshAuthentication.password
+            ? config.password
+            : config.passphrase;
+        if (secret.isNotEmpty) {
+          try {
+            credentialId = await _credentialStore.save(
+              storage: _securityConfig.credentialStorage,
+              secret: secret,
+              masterPassword: _masterPassword,
+            );
+          } on Object catch (error) {
+            if (mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(SnackBar(content: Text('凭据保存失败: $error')));
+            }
+          }
+        }
+      }
+      _sessionManager.addExistingSshSession(
+        sessionId: sessionId,
         name: '${config.username}@${config.host}',
-        host: config.host,
-        port: config.port,
-        username: config.username,
-        password: config.password,
+        profileConfig: <String, Object?>{
+          'profileId': profile?.id,
+          'host': config.host,
+          'port': config.port,
+          'username': config.username,
+          'authType': config.authentication.name,
+          'privateKeyPath': config.privateKeyPath.isEmpty
+              ? null
+              : config.privateKeyPath,
+          'credentialStorage': credentialId == null
+              ? profile?.credentialStorage
+              : _securityConfig.credentialStorage.name,
+          'credentialId': credentialId ?? profile?.credentialId,
+          'logging': profile?.logging ?? false,
+          'logPath': profile?.logPath,
+          'quickCommands': profile?.quickCommands ?? const <String>[],
+          'tabColor': profile?.tabColor,
+          'autoReconnect': _networkConfig.reconnect.enabled,
+        },
+      );
+      unawaited(
+        _auditLogger.write(
+          action: 'session_connected',
+          sessionId: sessionId.toString(),
+          user: config.username,
+          host: config.host,
+        ),
       );
 
       setState(() => _connecting = false);
@@ -318,6 +723,14 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
         _sessionManager.resize(_lastCols, _lastRows);
       }
     } catch (e) {
+      unawaited(
+        _auditLogger.write(
+          action: 'session_connect_failed',
+          detail: e.toString(),
+          user: config.username,
+          host: config.host,
+        ),
+      );
       setState(() => _connecting = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -330,8 +743,67 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     }
   }
 
+  Future<String?> _ensureMasterPassword() async {
+    if (_masterPassword?.isNotEmpty == true) return _masterPassword;
+    final controller = TextEditingController();
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('输入主密码'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: '主密码'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text;
+              if (value.isNotEmpty) Navigator.of(context).pop(value);
+            },
+            child: const Text('解锁'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (password != null) _masterPassword = password;
+    return password;
+  }
+
   void _disconnect() {
-    _sessionManager.removeSession(_sessionManager.activeSessionIndex);
+    _closeSessionAt(_sessionManager.activeSessionIndex);
+  }
+
+  void _closeSessionAt(int index) {
+    if (index < 0 || index >= _sessionManager.sessions.length) return;
+    final session = _sessionManager.sessions[index];
+    unawaited(
+      _auditLogger.write(
+        action: 'session_closed',
+        sessionId: session.id.toString(),
+        detail: session.type.name,
+      ),
+    );
+    _sessionLogWriter.close(session.id);
+    final config = session.profileConfig;
+    final credentialId = config?['credentialId'] as String?;
+    if (config?['profileId'] == null && credentialId != null) {
+      final storage = CredentialStorage.values.firstWhere(
+        (value) => value.name == config?['credentialStorage'],
+        orElse: () => CredentialStorage.none,
+      );
+      unawaited(
+        _credentialStore.delete(storage: storage, credentialId: credentialId),
+      );
+    }
+    _sessionManager.removeSession(index);
   }
 
   void _addLocalShell() {
@@ -351,6 +823,8 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
             setState(() {
               _settings = newSettings;
             });
+            unawaited(_applyWindowOpacity(newSettings.windowOpacity));
+            unawaited(_saveAppConfig());
           },
         ),
       ),
@@ -420,12 +894,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       builder: (context) => CommandPalette(
         profiles: _profileStore.profiles,
         onSessionSelected: (profile) {
-          // 从配置启动会话
-          if (profile.type == SessionProfileType.ssh && profile.host != null) {
-            _openSessionEditor();
-          } else if (profile.type == SessionProfileType.localShell) {
-            _addLocalShell();
-          }
+          unawaited(_connectFromProfile(profile));
         },
         onCommand: (command) {
           switch (command) {
@@ -437,6 +906,9 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
               break;
             case 'settings':
               _openSettings();
+              break;
+            case 'check_updates':
+              unawaited(_checkForUpdates(silent: false));
               break;
           }
         },
@@ -467,7 +939,9 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
           onConfigChanged: (newConfig) {
             setState(() {
               _securityConfig = newConfig;
+              _auditLogger.configure(newConfig);
             });
+            unawaited(_saveAppConfig());
           },
         ),
       ),
@@ -475,27 +949,405 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   }
 
   void _saveSessionAsProfile(SessionInfo session) {
+    final config = session.profileConfig ?? const <String, Object?>{};
     final profile = SessionProfile(
-      id: session.id.toString(),
+      id: 'profile-${DateTime.now().microsecondsSinceEpoch}',
       name: session.name,
       type: session.type == SessionType.ssh
           ? SessionProfileType.ssh
           : SessionProfileType.localShell,
+      host: config['host'] as String?,
+      port: config['port'] as int?,
+      username: config['username'] as String?,
+      authType: config['authType'] == SshAuthentication.privateKey.name
+          ? SshAuthType.privateKey
+          : SshAuthType.password,
+      privateKeyPath: config['privateKeyPath'] as String?,
+      credentialId: config['credentialId'] as String?,
+      credentialStorage: config['credentialStorage'] as String?,
+      shell: config['shell'] as String?,
+      workingDir: config['workingDir'] as String?,
+      logging: config['logging'] == true,
+      logPath: config['logPath'] as String?,
+      quickCommands: List<String>.from(
+        config['quickCommands'] as List<dynamic>? ?? const [],
+      ),
+      tabColor: config['tabColor'] as String?,
     );
     _profileStore.add(profile);
-    _profileStore.save();
+    unawaited(_profileStore.save());
+    _sessionManager.updateProfileConfig(
+      _sessionManager.activeSessionIndex,
+      <String, Object?>{...config, 'profileId': profile.id},
+    );
     setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('会话已保存: ${session.name}')),
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('会话已保存: ${session.name}')));
+  }
+
+  void _editProfile(SessionProfile profile) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => SessionProfileEditor(
+        profile: profile,
+        onSave: (updated) {
+          _profileStore.update(profile.id, updated);
+          unawaited(_profileStore.save());
+          setState(() {});
+        },
+      ),
     );
   }
 
-  void _connectFromProfile(SessionProfile profile) {
-    if (profile.type == SessionProfileType.ssh && profile.host != null) {
-      _openSessionEditor();
-    } else if (profile.type == SessionProfileType.localShell) {
-      _addLocalShell();
+  void _duplicateProfile(SessionProfile profile) {
+    _profileStore.add(
+      profile.copyWith(
+        id: 'profile-${DateTime.now().microsecondsSinceEpoch}',
+        name: '${profile.name} 副本',
+        autoLogin: false,
+      ),
+    );
+    unawaited(_profileStore.save());
+    setState(() {});
+  }
+
+  Future<void> _deleteProfile(SessionProfile profile) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除会话配置'),
+        content: Text('确定删除“${profile.name}”吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final credentialId = profile.credentialId;
+    if (credentialId != null) {
+      final storage = CredentialStorage.values.firstWhere(
+        (value) => value.name == profile.credentialStorage,
+        orElse: () => CredentialStorage.none,
+      );
+      await _credentialStore.delete(
+        storage: storage,
+        credentialId: credentialId,
+      );
     }
+    _profileStore.delete(profile.id);
+    await _profileStore.save();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _openQuickCommands() async {
+    final session = _sessionManager.activeSession;
+    if (session == null) return;
+    final commands = List<String>.from(
+      session.profileConfig?['quickCommands'] as List<dynamic>? ?? const [],
+    );
+    final controller = TextEditingController();
+    final command = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('快捷命令'),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (commands.isNotEmpty)
+                ...commands.map(
+                  (value) => ListTile(
+                    dense: true,
+                    title: Text(value),
+                    trailing: const Icon(Icons.send_rounded, size: 18),
+                    onTap: () => Navigator.of(context).pop(value),
+                  ),
+                ),
+              TextField(
+                controller: controller,
+                autofocus: commands.isEmpty,
+                decoration: const InputDecoration(labelText: '临时命令'),
+                onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('发送'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (command != null && command.isNotEmpty) {
+      _sessionManager.writeInput('$command\n');
+    }
+  }
+
+  Future<void> _showPortForwardStatus() async {
+    final active = _sessionManager.activeSession;
+    if (active?.type != SessionType.ssh) return;
+    var statuses = (active!.session as SshSession).portForwardStatus();
+    await showDialog<void>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('端口转发状态'),
+          content: SizedBox(
+            width: 620,
+            child: statuses.isEmpty
+                ? const Text('当前会话没有配置端口转发')
+                : ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: statuses.length,
+                    separatorBuilder: (_, _) => const Divider(),
+                    itemBuilder: (context, index) {
+                      final status = statuses[index];
+                      final target = status.type == 'dynamic'
+                          ? 'SOCKS5'
+                          : '${status.remoteHost}:${status.remotePort}';
+                      return ListTile(
+                        leading: Icon(
+                          status.state == 'running'
+                              ? Icons.check_circle_rounded
+                              : Icons.error_rounded,
+                          color: status.state == 'running'
+                              ? Colors.green
+                              : Colors.redAccent,
+                        ),
+                        title: Text(
+                          '${status.type.toUpperCase()} '
+                          '${status.bindAddress}:${status.bindPort} → $target',
+                        ),
+                        subtitle: Text(
+                          '状态 ${status.state} · 活动 ${status.activeConnections} · '
+                          '累计 ${status.totalConnections}\n'
+                          '上传 ${_formatBytes(status.uploadedBytes)} · '
+                          '下载 ${_formatBytes(status.downloadedBytes)}'
+                          '${status.lastError == null ? '' : '\n${status.lastError}'}',
+                        ),
+                      );
+                    },
+                  ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                setDialogState(() {
+                  statuses = (active.session as SshSession).portForwardStatus();
+                });
+              },
+              child: const Text('刷新'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) {
+      return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
+    }
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  }
+
+  Future<void> _toggleSyncInput() async {
+    if (!_syncInput) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('启用同步输入'),
+          content: Text(
+            '后续键盘输入和粘贴将同时发送到 '
+            '${_sessionManager.sessions.length} 个活动会话。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('启用'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    setState(() => _syncInput = !_syncInput);
+    _sessionManager.setSyncInput(_syncInput);
+  }
+
+  Future<void> _connectFromProfile(SessionProfile profile) async {
+    try {
+      if (profile.type == SessionProfileType.ssh && profile.host != null) {
+        String secret = '';
+        final credentialId = profile.credentialId;
+        if (credentialId != null) {
+          final storage = CredentialStorage.values.firstWhere(
+            (value) => value.name == profile.credentialStorage,
+            orElse: () => CredentialStorage.none,
+          );
+          if (storage == CredentialStorage.vault &&
+              await _ensureMasterPassword() == null) {
+            return;
+          }
+          secret =
+              await _credentialStore.load(
+                storage: storage,
+                credentialId: credentialId,
+                masterPassword: _masterPassword,
+              ) ??
+              '';
+        }
+        final privateKey = profile.authType == SshAuthType.privateKey;
+        await _connect(
+          SshConfig(
+            host: profile.host!,
+            port: profile.port ?? 22,
+            username: profile.username ?? '',
+            authentication: privateKey
+                ? SshAuthentication.privateKey
+                : SshAuthentication.password,
+            password: privateKey ? '' : secret,
+            privateKeyPath: profile.privateKeyPath ?? '',
+            passphrase: privateKey ? secret : '',
+            acceptUnknownHost: false,
+          ),
+          profile: profile,
+        );
+      } else if (profile.type == SessionProfileType.localShell) {
+        _sessionManager.addLocalShellSession(
+          name: profile.name,
+          shell: profile.shell,
+          workingDir: profile.workingDir,
+        );
+        final session = _sessionManager.sessions.last;
+        _sessionManager.updateProfileConfig(
+          _sessionManager.sessions.length - 1,
+          <String, Object?>{
+            ...?session.profileConfig,
+            'profileId': profile.id,
+            'logging': profile.logging,
+            'logPath': profile.logPath,
+            'quickCommands': profile.quickCommands,
+            'tabColor': profile.tabColor,
+          },
+        );
+        _afterProtocolConnected();
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('打开会话失败: $error')));
+      }
+    }
+  }
+
+  SessionInfo? get _secondarySession {
+    final active = _sessionManager.activeSession;
+    for (final session in _sessionManager.sessions) {
+      if (session.id != active?.id) return session;
+    }
+    return null;
+  }
+
+  Widget _buildTerminalPane(SessionInfo? session, {required bool interactive}) {
+    if (_connecting && interactive) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(color: Color(0xff2f6fed)),
+            SizedBox(height: 16),
+            Text('正在连接...', style: TextStyle(color: Color(0xff8e98a8))),
+          ],
+        ),
+      );
+    }
+    Widget terminal = TerminalView(
+      snapshot: session?.snapshot,
+      onSelectionChanged: interactive ? _onSelectionChanged : null,
+      onMouseEvent: interactive ? _onMouseEvent : null,
+      settings: _settings,
+      searchResult: interactive ? _searchResult : null,
+    );
+    if (!interactive && session != null) {
+      terminal = GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () {
+          final index = _sessionManager.sessions.indexWhere(
+            (candidate) => candidate.id == session.id,
+          );
+          if (index >= 0) {
+            _sessionManager.setActiveSession(index);
+            _focusNode.requestFocus();
+          }
+        },
+        child: terminal,
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          const horizontalPadding = 8.0;
+          const verticalPadding = 8.0;
+          final cols =
+              ((constraints.maxWidth - horizontalPadding) / _settings.cellWidth)
+                  .floor();
+          final rows =
+              ((constraints.maxHeight - verticalPadding) / _settings.cellHeight)
+                  .floor();
+          if (session != null && cols > 0 && rows > 0) {
+            _sessionManager.resizeSession(session.id, cols, rows);
+            if (interactive) {
+              _lastCols = cols;
+              _lastRows = rows;
+            }
+          }
+        });
+        if (!interactive) return terminal;
+        return KeyboardListener(
+          focusNode: _focusNode,
+          onKeyEvent: (event) {
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.keyP &&
+                HardwareKeyboard.instance.isControlPressed) {
+              _openCommandPalette();
+              return;
+            }
+            _inputHandler.handleKeyEvent(event);
+          },
+          child: terminal,
+        );
+      },
+    );
   }
 
   @override
@@ -508,13 +1360,27 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
             activeSessionIndex: _sessionManager.activeSessionIndex,
             savedProfiles: _profileStore.profiles,
             onNewSession: _openSessionEditor,
+            onNewProtocol: _openProtocolSessionEditor,
             onNewLocalShell: _addLocalShell,
             onDisconnect: _disconnect,
+            onSaveProfile: () {
+              final session = _sessionManager.activeSession;
+              if (session != null &&
+                  (session.type == SessionType.ssh ||
+                      session.type == SessionType.localShell)) {
+                _saveSessionAsProfile(session);
+              }
+            },
             onSessionSelected: (index) {
               _sessionManager.setActiveSession(index);
               _focusNode.requestFocus();
             },
             onProfileTap: _connectFromProfile,
+            onProfileEdit: _editProfile,
+            onProfileDuplicate: _duplicateProfile,
+            onProfileDelete: (profile) {
+              unawaited(_deleteProfile(profile));
+            },
             onSettings: _openSettings,
             onNetworkSettings: _openNetworkSettings,
             onSecuritySettings: _openSecuritySettings,
@@ -533,7 +1399,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                     _focusNode.requestFocus();
                   },
                   onTabClosed: (index) {
-                    _sessionManager.removeSession(index);
+                    _closeSessionAt(index);
                   },
                 ),
                 _TopBar(
@@ -541,6 +1407,21 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                   session: _sessionManager.activeSession,
                   connecting: _connecting,
                   onSearch: _toggleSearch,
+                  onQuickCommands: _sessionManager.activeSession == null
+                      ? null
+                      : _openQuickCommands,
+                  onPortForwardStatus:
+                      _sessionManager.activeSession?.type == SessionType.ssh
+                      ? _showPortForwardStatus
+                      : null,
+                  splitPane: _splitPane,
+                  syncInput: _syncInput,
+                  onToggleSplit: _sessionManager.sessions.length < 2
+                      ? null
+                      : () => setState(() => _splitPane = !_splitPane),
+                  onToggleSyncInput: _sessionManager.sessions.length < 2
+                      ? null
+                      : () => unawaited(_toggleSyncInput()),
                 ),
                 if (_showSearch)
                   TerminalSearchBar(
@@ -554,61 +1435,34 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                       Expanded(
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                          child: _connecting
-                              ? const Center(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      CircularProgressIndicator(
-                                        color: Color(0xff2f6fed),
+                          child: _splitPane && _secondarySession != null
+                              ? Row(
+                                  children: [
+                                    Expanded(
+                                      child: _buildTerminalPane(
+                                        _sessionManager.activeSession,
+                                        interactive: true,
                                       ),
-                                      SizedBox(height: 16),
-                                      Text(
-                                        '正在连接...',
-                                        style: TextStyle(color: Color(0xff8e98a8)),
+                                    ),
+                                    const VerticalDivider(width: 1),
+                                    Expanded(
+                                      child: _buildTerminalPane(
+                                        _secondarySession,
+                                        interactive: false,
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                  ],
                                 )
-                              : LayoutBuilder(
-                                  builder: (context, constraints) {
-                                    // 终端区域大小变化时，调整 PTY 大小
-                                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                                      _onTerminalResize(
-                                        constraints.maxWidth,
-                                        constraints.maxHeight,
-                                      );
-                                    });
-                                    return KeyboardListener(
-                                      focusNode: _focusNode,
-                                      onKeyEvent: (event) {
-                                        // Ctrl+P 打开命令面板
-                                        if (event is KeyDownEvent &&
-                                            event.logicalKey == LogicalKeyboardKey.keyP &&
-                                            HardwareKeyboard.instance.isControlPressed) {
-                                          _openCommandPalette();
-                                          return;
-                                        }
-                                        _inputHandler.handleKeyEvent(event);
-                                      },
-                                      child: TerminalView(
-                                        snapshot: _snapshot,
-                                        onSelectionChanged: _onSelectionChanged,
-                                        onMouseEvent: _onMouseEvent,
-                                        settings: _settings,
-                                        searchResult: _searchResult,
-                                      ),
-                                    );
-                                  },
+                              : _buildTerminalPane(
+                                  _sessionManager.activeSession,
+                                  interactive: true,
                                 ),
                         ),
                       ),
                       if (_showSftp && _sftpSession != null)
                         SizedBox(
-                          width: 320,
-                          child: SftpPanel(
-                            sftpSession: _sftpSession,
-                          ),
+                          width: 520,
+                          child: SftpPanel(sftpSession: _sftpSession),
                         ),
                     ],
                   ),
@@ -627,10 +1481,15 @@ class _SessionRail extends StatelessWidget {
   final int activeSessionIndex;
   final List<SessionProfile> savedProfiles;
   final VoidCallback onNewSession;
+  final VoidCallback onNewProtocol;
   final VoidCallback onNewLocalShell;
   final VoidCallback onDisconnect;
+  final VoidCallback onSaveProfile;
   final void Function(int index) onSessionSelected;
   final void Function(SessionProfile profile) onProfileTap;
+  final void Function(SessionProfile profile) onProfileEdit;
+  final void Function(SessionProfile profile) onProfileDuplicate;
+  final void Function(SessionProfile profile) onProfileDelete;
   final VoidCallback onSettings;
   final VoidCallback onNetworkSettings;
   final VoidCallback onSecuritySettings;
@@ -643,10 +1502,15 @@ class _SessionRail extends StatelessWidget {
     required this.activeSessionIndex,
     required this.savedProfiles,
     required this.onNewSession,
+    required this.onNewProtocol,
     required this.onNewLocalShell,
     required this.onDisconnect,
+    required this.onSaveProfile,
     required this.onSessionSelected,
     required this.onProfileTap,
+    required this.onProfileEdit,
+    required this.onProfileDuplicate,
+    required this.onProfileDelete,
     required this.onSettings,
     required this.onNetworkSettings,
     required this.onSecuritySettings,
@@ -686,6 +1550,12 @@ class _SessionRail extends StatelessWidget {
               selected: false,
               onTap: onNewLocalShell,
             ),
+            _NavItem(
+              icon: Icons.cable_rounded,
+              label: '新建 Telnet / TCP / Serial',
+              selected: false,
+              onTap: onNewProtocol,
+            ),
             if (sessions.isNotEmpty) ...[
               const Divider(color: Color(0xff2a303b), height: 28),
               Padding(
@@ -711,6 +1581,13 @@ class _SessionRail extends StatelessWidget {
               }),
               if (activeSessionIndex >= 0)
                 _NavItem(
+                  icon: Icons.bookmark_add_rounded,
+                  label: '保存当前会话',
+                  selected: false,
+                  onTap: onSaveProfile,
+                ),
+              if (activeSessionIndex >= 0)
+                _NavItem(
                   icon: Icons.close_rounded,
                   label: '关闭当前会话',
                   selected: false,
@@ -730,8 +1607,9 @@ class _SessionRail extends StatelessWidget {
                 child: SessionTree(
                   profiles: savedProfiles,
                   onSessionTap: onProfileTap,
-                  onSessionEdit: (profile) {},
-                  onSessionDelete: (profile) {},
+                  onSessionEdit: onProfileEdit,
+                  onSessionDuplicate: onProfileDuplicate,
+                  onSessionDelete: onProfileDelete,
                 ),
               ),
             ],
@@ -852,6 +1730,7 @@ class _TabBar extends StatelessWidget {
           final icon = session.type == SessionType.ssh
               ? Icons.cloud_rounded
               : Icons.terminal_rounded;
+          final tabColor = _tabColor(session.profileConfig?['tabColor']);
 
           return GestureDetector(
             onTap: () => onTabSelected(index),
@@ -859,10 +1738,12 @@ class _TabBar extends StatelessWidget {
               constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
-                color: isActive
-                    ? const Color(0xff263247)
-                    : Colors.transparent,
+                color: isActive ? const Color(0xff263247) : Colors.transparent,
                 border: Border(
+                  top: BorderSide(
+                    color: tabColor ?? Colors.transparent,
+                    width: 2,
+                  ),
                   right: BorderSide(color: const Color(0xff2a303b)),
                 ),
               ),
@@ -900,6 +1781,17 @@ class _TabBar extends StatelessWidget {
       ),
     );
   }
+
+  Color? _tabColor(Object? value) {
+    return switch (value) {
+      'blue' => const Color(0xff2f6fed),
+      'green' => const Color(0xff4e9a06),
+      'orange' => Colors.orangeAccent,
+      'red' => Colors.redAccent,
+      'purple' => const Color(0xffad7fa8),
+      _ => null,
+    };
+  }
 }
 
 class _TopBar extends StatelessWidget {
@@ -907,12 +1799,24 @@ class _TopBar extends StatelessWidget {
   final SessionInfo? session;
   final bool connecting;
   final VoidCallback? onSearch;
+  final VoidCallback? onQuickCommands;
+  final VoidCallback? onPortForwardStatus;
+  final bool splitPane;
+  final bool syncInput;
+  final VoidCallback? onToggleSplit;
+  final VoidCallback? onToggleSyncInput;
 
   const _TopBar({
     required this.core,
     this.session,
     this.connecting = false,
     this.onSearch,
+    this.onQuickCommands,
+    this.onPortForwardStatus,
+    this.splitPane = false,
+    this.syncInput = false,
+    this.onToggleSplit,
+    this.onToggleSyncInput,
   });
 
   @override
@@ -951,6 +1855,44 @@ class _TopBar extends StatelessWidget {
               color: const Color(0xff8e98a8),
               onPressed: onSearch,
               tooltip: '搜索',
+            ),
+          if (onQuickCommands != null)
+            IconButton(
+              icon: const Icon(Icons.bolt_rounded, size: 18),
+              color: const Color(0xff8e98a8),
+              onPressed: onQuickCommands,
+              tooltip: '快捷命令',
+            ),
+          if (onPortForwardStatus != null)
+            IconButton(
+              icon: const Icon(Icons.swap_horiz_rounded, size: 18),
+              color: const Color(0xff8e98a8),
+              onPressed: onPortForwardStatus,
+              tooltip: '端口转发状态',
+            ),
+          if (onToggleSplit != null)
+            IconButton(
+              icon: Icon(
+                Icons.vertical_split_rounded,
+                size: 18,
+                color: splitPane
+                    ? const Color(0xff8fb6ff)
+                    : const Color(0xff8e98a8),
+              ),
+              onPressed: onToggleSplit,
+              tooltip: splitPane ? '关闭分屏' : '双会话分屏',
+            ),
+          if (onToggleSyncInput != null)
+            IconButton(
+              icon: Icon(
+                Icons.sync_alt_rounded,
+                size: 18,
+                color: syncInput
+                    ? Colors.orangeAccent
+                    : const Color(0xff8e98a8),
+              ),
+              onPressed: onToggleSyncInput,
+              tooltip: syncInput ? '关闭同步输入' : '向全部会话同步输入',
             ),
           Container(
             height: 28,

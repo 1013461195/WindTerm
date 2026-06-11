@@ -45,45 +45,24 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
         children: [
           _buildSection(
             title: '安全级别',
-            children: [
-              _buildSecurityLevelSelector(),
-            ],
+            children: [_buildSecurityLevelSelector()],
           ),
           const SizedBox(height: 16),
           _buildSection(
             title: '凭据存储',
-            children: [
-              _buildCredentialStorageSettings(),
-            ],
+            children: [_buildCredentialStorageSettings()],
           ),
           const SizedBox(height: 16),
-          _buildSection(
-            title: 'Host Key',
-            children: [
-              _buildHostKeySettings(),
-            ],
-          ),
+          _buildSection(title: 'Host Key', children: [_buildHostKeySettings()]),
           const SizedBox(height: 16),
-          _buildSection(
-            title: '审计日志',
-            children: [
-              _buildAuditLogSettings(),
-            ],
-          ),
+          _buildSection(title: '审计日志', children: [_buildAuditLogSettings()]),
           const SizedBox(height: 16),
           _buildSection(
             title: '终端安全',
-            children: [
-              _buildTerminalSecuritySettings(),
-            ],
+            children: [_buildTerminalSecuritySettings()],
           ),
           const SizedBox(height: 16),
-          _buildSection(
-            title: '剪贴板',
-            children: [
-              _buildClipboardSettings(),
-            ],
-          ),
+          _buildSection(title: '剪贴板', children: [_buildClipboardSettings()]),
         ],
       ),
     );
@@ -119,38 +98,40 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
   }
 
   Widget _buildSecurityLevelSelector() {
-    return Column(
-      children: SecurityLevel.values.map((level) {
-        final isSelected = level == _config.level;
-        final (label, description) = switch (level) {
-          SecurityLevel.low => ('低', '基本安全，适合受信任环境'),
-          SecurityLevel.medium => ('中', '平衡安全与便利性'),
-          SecurityLevel.high => ('高', '增强安全，适合生产环境'),
-          SecurityLevel.maximum => ('最高', '最大安全，可能影响便利性'),
-        };
+    return RadioGroup<SecurityLevel>(
+      groupValue: _config.level,
+      onChanged: (value) {
+        _updateConfig(_config.copyWith(level: value));
+      },
+      child: Column(
+        children: SecurityLevel.values.map((level) {
+          final isSelected = level == _config.level;
+          final (label, description) = switch (level) {
+            SecurityLevel.low => ('低', '基本安全，适合受信任环境'),
+            SecurityLevel.medium => ('中', '平衡安全与便利性'),
+            SecurityLevel.high => ('高', '增强安全，适合生产环境'),
+            SecurityLevel.maximum => ('最高', '最大安全，可能影响便利性'),
+          };
 
-        return RadioListTile<SecurityLevel>(
-          title: Text(
-            label,
-            style: TextStyle(
-              color: isSelected ? const Color(0xff2f6fed) : const Color(0xffd7e0ee),
-              fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+          return RadioListTile<SecurityLevel>(
+            title: Text(
+              label,
+              style: TextStyle(
+                color: isSelected
+                    ? const Color(0xff2f6fed)
+                    : const Color(0xffd7e0ee),
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.normal,
+              ),
             ),
-          ),
-          subtitle: Text(
-            description,
-            style: const TextStyle(color: Color(0xff4a5568), fontSize: 12),
-          ),
-          value: level,
-          groupValue: _config.level,
-          activeColor: const Color(0xff2f6fed),
-          onChanged: (value) {
-            if (value != null) {
-              _updateConfig(_config.copyWith(level: value));
-            }
-          },
-        );
-      }).toList(),
+            subtitle: Text(
+              description,
+              style: const TextStyle(color: Color(0xff4a5568), fontSize: 12),
+            ),
+            value: level,
+            activeColor: const Color(0xff2f6fed),
+          );
+        }).toList(),
+      ),
     );
   }
 
@@ -158,7 +139,7 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
     return Column(
       children: [
         DropdownButtonFormField<CredentialStorage>(
-          value: _config.credentialStorage,
+          initialValue: _config.credentialStorage,
           dropdownColor: const Color(0xff191d25),
           style: const TextStyle(color: Color(0xffd7e0ee)),
           decoration: const InputDecoration(
@@ -166,10 +147,7 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
             labelStyle: TextStyle(color: Color(0xff8e98a8)),
           ),
           items: const [
-            DropdownMenuItem(
-              value: CredentialStorage.none,
-              child: Text('不保存'),
-            ),
+            DropdownMenuItem(value: CredentialStorage.none, child: Text('不保存')),
             DropdownMenuItem(
               value: CredentialStorage.platform,
               child: Text('平台 Keychain'),
@@ -197,7 +175,7 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
               style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
             ),
             value: _config.masterPasswordEnabled,
-            activeColor: const Color(0xff2f6fed),
+            activeThumbColor: const Color(0xff2f6fed),
             onChanged: (value) {
               _updateConfig(_config.copyWith(masterPasswordEnabled: value));
             },
@@ -208,24 +186,16 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
   }
 
   Widget _buildHostKeySettings() {
-    return Column(
-      children: [
-        SwitchListTile(
-          title: const Text(
-            'Host Key 固定',
-            style: TextStyle(color: Color(0xffd7e0ee)),
-          ),
-          subtitle: const Text(
-            '验证并记录服务器 Host Key，检测中间人攻击',
-            style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
-          ),
-          value: _config.hostKeyPinning,
-          activeColor: const Color(0xff2f6fed),
-          onChanged: (value) {
-            _updateConfig(_config.copyWith(hostKeyPinning: value));
-          },
-        ),
-      ],
+    return const ListTile(
+      leading: Icon(Icons.verified_user_rounded, color: Color(0xff8ae234)),
+      title: Text(
+        'Host Key 固定已强制启用',
+        style: TextStyle(color: Color(0xffd7e0ee)),
+      ),
+      subtitle: Text(
+        '未知密钥必须确认后保存，密钥变更始终阻止连接',
+        style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
+      ),
     );
   }
 
@@ -242,7 +212,7 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
             style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
           ),
           value: _config.auditLogEnabled,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
             _updateConfig(_config.copyWith(auditLogEnabled: value));
           },
@@ -264,22 +234,19 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
             style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
           ),
           value: _config.osc52Disabled,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
             _updateConfig(_config.copyWith(osc52Disabled: value));
           },
         ),
         SwitchListTile(
-          title: const Text(
-            '粘贴确认',
-            style: TextStyle(color: Color(0xffd7e0ee)),
-          ),
+          title: const Text('粘贴确认', style: TextStyle(color: Color(0xffd7e0ee))),
           subtitle: const Text(
             '大量粘贴时显示确认对话框',
             style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
           ),
           value: _config.pasteConfirmation,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
             _updateConfig(_config.copyWith(pasteConfirmation: value));
           },
@@ -301,7 +268,7 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
             style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
           ),
           value: _config.clipboardAutoClear,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
             _updateConfig(_config.copyWith(clipboardAutoClear: value));
           },
@@ -323,9 +290,11 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
                   divisions: 11,
                   activeColor: const Color(0xff2f6fed),
                   onChanged: (value) {
-                    _updateConfig(_config.copyWith(
-                      clipboardAutoClearSeconds: value.round(),
-                    ));
+                    _updateConfig(
+                      _config.copyWith(
+                        clipboardAutoClearSeconds: value.round(),
+                      ),
+                    );
                   },
                 ),
               ),

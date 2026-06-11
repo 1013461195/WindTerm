@@ -6,6 +6,7 @@ class SessionTree extends StatefulWidget {
   final List<SessionProfile> profiles;
   final void Function(SessionProfile profile) onSessionTap;
   final void Function(SessionProfile profile) onSessionEdit;
+  final void Function(SessionProfile profile) onSessionDuplicate;
   final void Function(SessionProfile profile) onSessionDelete;
   final String? selectedFolder;
   final String? selectedTag;
@@ -15,6 +16,7 @@ class SessionTree extends StatefulWidget {
     required this.profiles,
     required this.onSessionTap,
     required this.onSessionEdit,
+    required this.onSessionDuplicate,
     required this.onSessionDelete,
     this.selectedFolder,
     this.selectedTag,
@@ -207,7 +209,10 @@ class _SessionTreeState extends State<SessionTree> {
           children: [
             ListTile(
               leading: const Icon(Icons.edit_rounded, color: Color(0xff8fb6ff)),
-              title: const Text('编辑', style: TextStyle(color: Color(0xffd7e0ee))),
+              title: const Text(
+                '编辑',
+                style: TextStyle(color: Color(0xffd7e0ee)),
+              ),
               onTap: () {
                 Navigator.pop(context);
                 widget.onSessionEdit(profile);
@@ -215,15 +220,24 @@ class _SessionTreeState extends State<SessionTree> {
             ),
             ListTile(
               leading: const Icon(Icons.copy_rounded, color: Color(0xff8fb6ff)),
-              title: const Text('复制', style: TextStyle(color: Color(0xffd7e0ee))),
+              title: const Text(
+                '复制',
+                style: TextStyle(color: Color(0xffd7e0ee)),
+              ),
               onTap: () {
                 Navigator.pop(context);
-                // TODO: 复制会话配置
+                widget.onSessionDuplicate(profile);
               },
             ),
             ListTile(
-              leading: const Icon(Icons.delete_rounded, color: Colors.redAccent),
-              title: const Text('删除', style: TextStyle(color: Color(0xffd7e0ee))),
+              leading: const Icon(
+                Icons.delete_rounded,
+                color: Colors.redAccent,
+              ),
+              title: const Text(
+                '删除',
+                style: TextStyle(color: Color(0xffd7e0ee)),
+              ),
               onTap: () {
                 Navigator.pop(context);
                 widget.onSessionDelete(profile);

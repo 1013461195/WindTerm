@@ -1,10 +1,10 @@
+import 'dart:convert';
+import 'dart:io';
+
+import '../../core_bridge/rust_core.dart';
+
 /// 安全级别
-enum SecurityLevel {
-  low,
-  medium,
-  high,
-  maximum,
-}
+enum SecurityLevel { low, medium, high, maximum }
 
 /// 凭据存储方式
 enum CredentialStorage {
@@ -53,13 +53,15 @@ class SecurityConfig {
   }) {
     return SecurityConfig(
       credentialStorage: credentialStorage ?? this.credentialStorage,
-      masterPasswordEnabled: masterPasswordEnabled ?? this.masterPasswordEnabled,
+      masterPasswordEnabled:
+          masterPasswordEnabled ?? this.masterPasswordEnabled,
       hostKeyPinning: hostKeyPinning ?? this.hostKeyPinning,
       auditLogEnabled: auditLogEnabled ?? this.auditLogEnabled,
       auditLogPath: auditLogPath ?? this.auditLogPath,
       level: level ?? this.level,
       clipboardAutoClear: clipboardAutoClear ?? this.clipboardAutoClear,
-      clipboardAutoClearSeconds: clipboardAutoClearSeconds ?? this.clipboardAutoClearSeconds,
+      clipboardAutoClearSeconds:
+          clipboardAutoClearSeconds ?? this.clipboardAutoClearSeconds,
       osc52Disabled: osc52Disabled ?? this.osc52Disabled,
       pasteConfirmation: pasteConfirmation ?? this.pasteConfirmation,
     );
@@ -103,14 +105,7 @@ class SecurityConfig {
 }
 
 /// Host Key 状态
-enum HostKeyStatus {
-  ok,
-  unknown,
-  changed,
-  otherAlgorithm,
-  notFound,
-  error,
-}
+enum HostKeyStatus { ok, unknown, changed, otherAlgorithm, notFound, error }
 
 /// Host Key 信息
 class HostKeyInfo {
@@ -212,5 +207,120 @@ class AuditLogEntry {
     buffer.write('session=$sessionId');
     if (detail != null) buffer.write(' $detail');
     return buffer.toString();
+  }
+}
+
+class AuditLogger {
+  AuditLogger(this.dataDirectory);
+
+  final String dataDirectory;
+  SecurityConfig _config = const SecurityConfig();
+
+  void configure(SecurityConfig config) {
+    _config = config;
+  }
+
+  Future<void> write({
+    required String action,
+    String sessionId = '',
+    String? detail,
+    String? user,
+    String? host,
+  }) async {
+    if (!_config.auditLogEnabled) return;
+    final path = _config.auditLogPath?.trim().isNotEmpty == true
+        ? _config.auditLogPath!
+        : '$dataDirectory/logs/audit.jsonl';
+    final entry = AuditLogEntry(
+      timestamp: DateTime.now().toUtc(),
+      sessionId: sessionId,
+      action: action,
+      detail: _sanitize(detail),
+      user: user,
+      host: host,
+    );
+    final file = File(path);
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      '${jsonEncode(entry.toJson())}\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  }
+
+  String? _sanitize(String? value) {
+    if (value == null) return null;
+    return value
+        .replaceAll(
+          RegExp(
+            r'(password|passphrase|token|authorization)\s*[=:]\s*\S+',
+            caseSensitive: false,
+          ),
+          r'$1=<redacted>',
+        )
+        .replaceAll(RegExp(r'[\r\n]+'), ' ');
+  }
+}
+
+class CredentialStore {
+  CredentialStore(this._core, {this.vaultDirectory = '.wind_send_vault'});
+
+  final RustCore _core;
+  final String vaultDirectory;
+
+  Future<String> save({
+    required CredentialStorage storage,
+    required String secret,
+    String? masterPassword,
+  }) async {
+    if (storage == CredentialStorage.none) {
+      throw StateError('Credential storage is disabled');
+    }
+    final id = '${DateTime.now().microsecondsSinceEpoch}';
+    if (storage == CredentialStorage.platform) {
+      if (!_core.keychainSet(id, secret)) {
+        throw StateError('写入平台 Keychain 失败');
+      }
+      return id;
+    }
+    final password = masterPassword;
+    if (password == null || password.isEmpty) {
+      throw StateError('主密码不能为空');
+    }
+    final encrypted = _core.encryptCredential(secret, password);
+    final file = File('$vaultDirectory/$id.json');
+    await file.create(recursive: true);
+    await file.writeAsString(encrypted, flush: true);
+    return id;
+  }
+
+  Future<String?> load({
+    required CredentialStorage storage,
+    required String credentialId,
+    String? masterPassword,
+  }) async {
+    if (storage == CredentialStorage.platform) {
+      return _core.keychainGet(credentialId);
+    }
+    if (storage != CredentialStorage.vault) return null;
+    final password = masterPassword;
+    if (password == null || password.isEmpty) {
+      throw StateError('主密码不能为空');
+    }
+    final file = File('$vaultDirectory/$credentialId.json');
+    if (!await file.exists()) return null;
+    return _core.decryptCredential(await file.readAsString(), password);
+  }
+
+  Future<void> delete({
+    required CredentialStorage storage,
+    required String credentialId,
+  }) async {
+    if (storage == CredentialStorage.platform) {
+      _core.keychainDelete(credentialId);
+    } else if (storage == CredentialStorage.vault) {
+      final file = File('$vaultDirectory/$credentialId.json');
+      if (await file.exists()) await file.delete();
+    }
   }
 }

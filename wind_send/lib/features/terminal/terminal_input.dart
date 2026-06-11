@@ -5,6 +5,7 @@ class TerminalInputHandler {
   final void Function(Uint8List data) onInput;
   final void Function()? onCopy;
   final void Function()? onPaste;
+  bool applicationCursorMode = false;
 
   TerminalInputHandler({required this.onInput, this.onCopy, this.onPaste});
 
@@ -158,16 +159,16 @@ class TerminalInputHandler {
 
     // 方向键（普通模式）
     if (key == LogicalKeyboardKey.arrowUp) {
-      return Uint8List.fromList([0x1b, 0x5b, 0x41]);
+      return _cursorSequence(0x41);
     }
     if (key == LogicalKeyboardKey.arrowDown) {
-      return Uint8List.fromList([0x1b, 0x5b, 0x42]);
+      return _cursorSequence(0x42);
     }
     if (key == LogicalKeyboardKey.arrowRight) {
-      return Uint8List.fromList([0x1b, 0x5b, 0x43]);
+      return _cursorSequence(0x43);
     }
     if (key == LogicalKeyboardKey.arrowLeft) {
-      return Uint8List.fromList([0x1b, 0x5b, 0x44]);
+      return _cursorSequence(0x44);
     }
 
     // Home / End
@@ -236,5 +237,13 @@ class TerminalInputHandler {
     }
 
     return null;
+  }
+
+  Uint8List _cursorSequence(int finalByte) {
+    return Uint8List.fromList([
+      0x1b,
+      applicationCursorMode ? 0x4f : 0x5b,
+      finalByte,
+    ]);
   }
 }

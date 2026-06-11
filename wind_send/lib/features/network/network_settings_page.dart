@@ -43,47 +43,25 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          _buildSection(
-            title: '代理',
-            children: [
-              _buildProxySettings(),
-            ],
-          ),
+          _buildSection(title: '代理', children: [_buildProxySettings()]),
           const SizedBox(height: 16),
           _buildSection(
-            title: '跳板机',
-            children: [
-              _buildJumpHostSettings(),
-            ],
+            title: 'ProxyCommand',
+            children: [_buildProxyCommandSettings()],
           ),
           const SizedBox(height: 16),
-          _buildSection(
-            title: '端口转发',
-            children: [
-              _buildPortForwardSettings(),
-            ],
-          ),
+          _buildSection(title: '跳板机', children: [_buildJumpHostSettings()]),
+          const SizedBox(height: 16),
+          _buildSection(title: '端口转发', children: [_buildPortForwardSettings()]),
           const SizedBox(height: 16),
           _buildSection(
             title: 'Keepalive',
-            children: [
-              _buildKeepaliveSettings(),
-            ],
+            children: [_buildKeepaliveSettings()],
           ),
           const SizedBox(height: 16),
-          _buildSection(
-            title: '重连策略',
-            children: [
-              _buildReconnectSettings(),
-            ],
-          ),
+          _buildSection(title: '重连策略', children: [_buildReconnectSettings()]),
           const SizedBox(height: 16),
-          _buildSection(
-            title: '高级',
-            children: [
-              _buildAdvancedSettings(),
-            ],
-          ),
+          _buildSection(title: '高级', children: [_buildAdvancedSettings()]),
         ],
       ),
     );
@@ -131,32 +109,25 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             labelStyle: TextStyle(color: Color(0xff8e98a8)),
           ),
           items: const [
-            DropdownMenuItem(
-              value: ProxyType.none,
-              child: Text('无'),
-            ),
-            DropdownMenuItem(
-              value: ProxyType.http,
-              child: Text('HTTP'),
-            ),
-            DropdownMenuItem(
-              value: ProxyType.socks5,
-              child: Text('SOCKS5'),
-            ),
+            DropdownMenuItem(value: ProxyType.none, child: Text('无')),
+            DropdownMenuItem(value: ProxyType.http, child: Text('HTTP')),
+            DropdownMenuItem(value: ProxyType.socks5, child: Text('SOCKS5')),
           ],
           onChanged: (value) {
             if (value == ProxyType.none) {
-              _updateConfig(_config.copyWith(proxy: null));
+              _updateConfig(_config.copyWith(clearProxy: true));
             } else {
-              _updateConfig(_config.copyWith(
-                proxy: ProxyConfig(
-                  type: value!,
-                  host: proxy?.host ?? '',
-                  port: proxy?.port ?? 1080,
-                  username: proxy?.username,
-                  password: proxy?.password,
+              _updateConfig(
+                _config.copyWith(
+                  proxy: ProxyConfig(
+                    type: value!,
+                    host: proxy?.host ?? '',
+                    port: proxy?.port ?? 1080,
+                    username: proxy?.username,
+                    password: proxy?.password,
+                  ),
                 ),
-              ));
+              );
             }
           },
         ),
@@ -170,15 +141,17 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
               labelStyle: TextStyle(color: Color(0xff8e98a8)),
             ),
             onChanged: (value) {
-              _updateConfig(_config.copyWith(
-                proxy: ProxyConfig(
-                  type: proxy.type,
-                  host: value,
-                  port: proxy.port,
-                  username: proxy.username,
-                  password: proxy.password,
+              _updateConfig(
+                _config.copyWith(
+                  proxy: ProxyConfig(
+                    type: proxy.type,
+                    host: value,
+                    port: proxy.port,
+                    username: proxy.username,
+                    password: proxy.password,
+                  ),
                 ),
-              ));
+              );
             },
           ),
           const SizedBox(height: 8),
@@ -191,19 +164,42 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             ),
             keyboardType: TextInputType.number,
             onChanged: (value) {
-              _updateConfig(_config.copyWith(
-                proxy: ProxyConfig(
-                  type: proxy.type,
-                  host: proxy.host,
-                  port: int.tryParse(value) ?? 1080,
-                  username: proxy.username,
-                  password: proxy.password,
+              _updateConfig(
+                _config.copyWith(
+                  proxy: ProxyConfig(
+                    type: proxy.type,
+                    host: proxy.host,
+                    port: int.tryParse(value) ?? 1080,
+                    username: proxy.username,
+                    password: proxy.password,
+                  ),
                 ),
-              ));
+              );
             },
           ),
         ],
       ],
+    );
+  }
+
+  Widget _buildProxyCommandSettings() {
+    return TextFormField(
+      initialValue: _config.proxyCommand,
+      style: const TextStyle(color: Color(0xffd7e0ee)),
+      decoration: const InputDecoration(
+        labelText: '命令',
+        hintText: 'cloudflared access ssh --hostname %h',
+        helperText: '支持 %h（主机）、%p（端口）、%%（百分号）',
+        labelStyle: TextStyle(color: Color(0xff8e98a8)),
+      ),
+      onChanged: (value) {
+        final command = value.trim();
+        _updateConfig(
+          command.isEmpty
+              ? _config.copyWith(clearProxyCommand: true)
+              : _config.copyWith(proxyCommand: command),
+        );
+      },
     );
   }
 
@@ -291,11 +287,13 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             onPressed: () {
               Navigator.pop(context);
               final newList = List<JumpHostConfig>.from(_config.jumpHosts);
-              newList.add(JumpHostConfig(
-                host: hostController.text,
-                port: int.tryParse(portController.text) ?? 22,
-                username: usernameController.text,
-              ));
+              newList.add(
+                JumpHostConfig(
+                  host: hostController.text,
+                  port: int.tryParse(portController.text) ?? 22,
+                  username: usernameController.text,
+                ),
+              );
               _updateConfig(_config.copyWith(jumpHosts: newList));
             },
             child: const Text('添加'),
@@ -321,7 +319,9 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
               trailing: IconButton(
                 icon: const Icon(Icons.delete_rounded, color: Colors.redAccent),
                 onPressed: () {
-                  final newList = List<PortForwardConfig>.from(_config.portForwards);
+                  final newList = List<PortForwardConfig>.from(
+                    _config.portForwards,
+                  );
                   newList.removeAt(index);
                   _updateConfig(_config.copyWith(portForwards: newList));
                 },
@@ -341,7 +341,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
   }
 
   void _showAddPortForwardDialog() {
-    final type = PortForwardType.local;
+    var type = PortForwardType.local;
     final bindAddressController = TextEditingController(text: 'localhost');
     final bindPortController = TextEditingController();
     final remoteHostController = TextEditingController();
@@ -349,93 +349,106 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: const Color(0xff191d25),
-        title: const Text('添加端口转发', style: TextStyle(color: Color(0xffd7e0ee))),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            DropdownButtonFormField<PortForwardType>(
-              initialValue: type,
-              dropdownColor: const Color(0xff191d25),
-              style: const TextStyle(color: Color(0xffd7e0ee)),
-              decoration: const InputDecoration(
-                labelText: '类型',
-                labelStyle: TextStyle(color: Color(0xff8e98a8)),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          backgroundColor: const Color(0xff191d25),
+          title: const Text(
+            '添加端口转发',
+            style: TextStyle(color: Color(0xffd7e0ee)),
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              DropdownButtonFormField<PortForwardType>(
+                initialValue: type,
+                dropdownColor: const Color(0xff191d25),
+                style: const TextStyle(color: Color(0xffd7e0ee)),
+                decoration: const InputDecoration(
+                  labelText: '类型',
+                  labelStyle: TextStyle(color: Color(0xff8e98a8)),
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: PortForwardType.local,
+                    child: Text('本地转发'),
+                  ),
+                  DropdownMenuItem(
+                    value: PortForwardType.remote,
+                    child: Text('远程转发'),
+                  ),
+                  DropdownMenuItem(
+                    value: PortForwardType.dynamic,
+                    child: Text('动态转发'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value != null) setDialogState(() => type = value);
+                },
               ),
-              items: const [
-                DropdownMenuItem(
-                  value: PortForwardType.local,
-                  child: Text('本地转发'),
+              TextField(
+                controller: bindAddressController,
+                style: const TextStyle(color: Color(0xffd7e0ee)),
+                decoration: const InputDecoration(
+                  labelText: '绑定地址',
+                  labelStyle: TextStyle(color: Color(0xff8e98a8)),
                 ),
-                DropdownMenuItem(
-                  value: PortForwardType.remote,
-                  child: Text('远程转发'),
+              ),
+              TextField(
+                controller: bindPortController,
+                style: const TextStyle(color: Color(0xffd7e0ee)),
+                decoration: const InputDecoration(
+                  labelText: '绑定端口',
+                  labelStyle: TextStyle(color: Color(0xff8e98a8)),
                 ),
-                DropdownMenuItem(
-                  value: PortForwardType.dynamic,
-                  child: Text('动态转发'),
+                keyboardType: TextInputType.number,
+              ),
+              if (type != PortForwardType.dynamic) ...[
+                TextField(
+                  controller: remoteHostController,
+                  style: const TextStyle(color: Color(0xffd7e0ee)),
+                  decoration: const InputDecoration(
+                    labelText: '目标主机',
+                    labelStyle: TextStyle(color: Color(0xff8e98a8)),
+                  ),
+                ),
+                TextField(
+                  controller: remotePortController,
+                  style: const TextStyle(color: Color(0xffd7e0ee)),
+                  decoration: const InputDecoration(
+                    labelText: '目标端口',
+                    labelStyle: TextStyle(color: Color(0xff8e98a8)),
+                  ),
+                  keyboardType: TextInputType.number,
                 ),
               ],
-              onChanged: (value) {},
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
             ),
-            TextField(
-              controller: bindAddressController,
-              style: const TextStyle(color: Color(0xffd7e0ee)),
-              decoration: const InputDecoration(
-                labelText: '绑定地址',
-                labelStyle: TextStyle(color: Color(0xff8e98a8)),
-              ),
-            ),
-            TextField(
-              controller: bindPortController,
-              style: const TextStyle(color: Color(0xffd7e0ee)),
-              decoration: const InputDecoration(
-                labelText: '绑定端口',
-                labelStyle: TextStyle(color: Color(0xff8e98a8)),
-              ),
-              keyboardType: TextInputType.number,
-            ),
-            TextField(
-              controller: remoteHostController,
-              style: const TextStyle(color: Color(0xffd7e0ee)),
-              decoration: const InputDecoration(
-                labelText: '远程主机',
-                labelStyle: TextStyle(color: Color(0xff8e98a8)),
-              ),
-            ),
-            TextField(
-              controller: remotePortController,
-              style: const TextStyle(color: Color(0xffd7e0ee)),
-              decoration: const InputDecoration(
-                labelText: '远程端口',
-                labelStyle: TextStyle(color: Color(0xff8e98a8)),
-              ),
-              keyboardType: TextInputType.number,
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(context);
+                final newList = List<PortForwardConfig>.from(
+                  _config.portForwards,
+                );
+                newList.add(
+                  PortForwardConfig(
+                    type: type,
+                    bindAddress: bindAddressController.text,
+                    bindPort: int.tryParse(bindPortController.text) ?? 0,
+                    remoteHost: remoteHostController.text,
+                    remotePort: int.tryParse(remotePortController.text),
+                  ),
+                );
+                _updateConfig(_config.copyWith(portForwards: newList));
+              },
+              child: const Text('添加'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              final newList = List<PortForwardConfig>.from(_config.portForwards);
-              newList.add(PortForwardConfig(
-                type: type,
-                bindAddress: bindAddressController.text,
-                bindPort: int.tryParse(bindPortController.text) ?? 0,
-                remoteHost: remoteHostController.text,
-                remotePort: int.tryParse(remotePortController.text),
-              ));
-              _updateConfig(_config.copyWith(portForwards: newList));
-            },
-            child: const Text('添加'),
-          ),
-        ],
       ),
     );
   }
@@ -450,25 +463,24 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             style: TextStyle(color: Color(0xffd7e0ee)),
           ),
           value: keepalive.enabled,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
-            _updateConfig(_config.copyWith(
-              keepalive: KeepaliveConfig(
-                enabled: value,
-                intervalSeconds: keepalive.intervalSeconds,
-                maxMisses: keepalive.maxMisses,
+            _updateConfig(
+              _config.copyWith(
+                keepalive: KeepaliveConfig(
+                  enabled: value,
+                  intervalSeconds: keepalive.intervalSeconds,
+                  maxMisses: keepalive.maxMisses,
+                ),
               ),
-            ));
+            );
           },
         ),
         if (keepalive.enabled) ...[
           const SizedBox(height: 8),
           Row(
             children: [
-              const Text(
-                '间隔 (秒)',
-                style: TextStyle(color: Color(0xff8e98a8)),
-              ),
+              const Text('间隔 (秒)', style: TextStyle(color: Color(0xff8e98a8))),
               const SizedBox(width: 16),
               Expanded(
                 child: Slider(
@@ -478,13 +490,15 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                   divisions: 11,
                   activeColor: const Color(0xff2f6fed),
                   onChanged: (value) {
-                    _updateConfig(_config.copyWith(
-                      keepalive: KeepaliveConfig(
-                        enabled: keepalive.enabled,
-                        intervalSeconds: value.round(),
-                        maxMisses: keepalive.maxMisses,
+                    _updateConfig(
+                      _config.copyWith(
+                        keepalive: KeepaliveConfig(
+                          enabled: keepalive.enabled,
+                          intervalSeconds: value.round(),
+                          maxMisses: keepalive.maxMisses,
+                        ),
                       ),
-                    ));
+                    );
                   },
                 ),
               ),
@@ -496,10 +510,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
           ),
           Row(
             children: [
-              const Text(
-                '最大丢失',
-                style: TextStyle(color: Color(0xff8e98a8)),
-              ),
+              const Text('最大丢失', style: TextStyle(color: Color(0xff8e98a8))),
               const SizedBox(width: 16),
               Expanded(
                 child: Slider(
@@ -509,13 +520,15 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                   divisions: 9,
                   activeColor: const Color(0xff2f6fed),
                   onChanged: (value) {
-                    _updateConfig(_config.copyWith(
-                      keepalive: KeepaliveConfig(
-                        enabled: keepalive.enabled,
-                        intervalSeconds: keepalive.intervalSeconds,
-                        maxMisses: value.round(),
+                    _updateConfig(
+                      _config.copyWith(
+                        keepalive: KeepaliveConfig(
+                          enabled: keepalive.enabled,
+                          intervalSeconds: keepalive.intervalSeconds,
+                          maxMisses: value.round(),
+                        ),
                       ),
-                    ));
+                    );
                   },
                 ),
               ),
@@ -540,28 +553,27 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             style: TextStyle(color: Color(0xffd7e0ee)),
           ),
           value: reconnect.enabled,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
-            _updateConfig(_config.copyWith(
-              reconnect: ReconnectPolicy(
-                enabled: value,
-                maxAttempts: reconnect.maxAttempts,
-                initialDelayMs: reconnect.initialDelayMs,
-                maxDelayMs: reconnect.maxDelayMs,
-                backoffFactor: reconnect.backoffFactor,
-                jitter: reconnect.jitter,
+            _updateConfig(
+              _config.copyWith(
+                reconnect: ReconnectPolicy(
+                  enabled: value,
+                  maxAttempts: reconnect.maxAttempts,
+                  initialDelayMs: reconnect.initialDelayMs,
+                  maxDelayMs: reconnect.maxDelayMs,
+                  backoffFactor: reconnect.backoffFactor,
+                  jitter: reconnect.jitter,
+                ),
               ),
-            ));
+            );
           },
         ),
         if (reconnect.enabled) ...[
           const SizedBox(height: 8),
           Row(
             children: [
-              const Text(
-                '最大尝试',
-                style: TextStyle(color: Color(0xff8e98a8)),
-              ),
+              const Text('最大尝试', style: TextStyle(color: Color(0xff8e98a8))),
               const SizedBox(width: 16),
               Expanded(
                 child: Slider(
@@ -571,16 +583,18 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
                   divisions: 9,
                   activeColor: const Color(0xff2f6fed),
                   onChanged: (value) {
-                    _updateConfig(_config.copyWith(
-                      reconnect: ReconnectPolicy(
-                        enabled: reconnect.enabled,
-                        maxAttempts: value.round(),
-                        initialDelayMs: reconnect.initialDelayMs,
-                        maxDelayMs: reconnect.maxDelayMs,
-                        backoffFactor: reconnect.backoffFactor,
-                        jitter: reconnect.jitter,
+                    _updateConfig(
+                      _config.copyWith(
+                        reconnect: ReconnectPolicy(
+                          enabled: reconnect.enabled,
+                          maxAttempts: value.round(),
+                          initialDelayMs: reconnect.initialDelayMs,
+                          maxDelayMs: reconnect.maxDelayMs,
+                          backoffFactor: reconnect.backoffFactor,
+                          jitter: reconnect.jitter,
+                        ),
                       ),
-                    ));
+                    );
                   },
                 ),
               ),
@@ -596,42 +610,43 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
               style: TextStyle(color: Color(0xffd7e0ee)),
             ),
             value: reconnect.backoffFactor > 1,
-            activeColor: const Color(0xff2f6fed),
+            activeThumbColor: const Color(0xff2f6fed),
             onChanged: (value) {
-              _updateConfig(_config.copyWith(
-                reconnect: ReconnectPolicy(
-                  enabled: reconnect.enabled,
-                  maxAttempts: reconnect.maxAttempts,
-                  initialDelayMs: reconnect.initialDelayMs,
-                  maxDelayMs: reconnect.maxDelayMs,
-                  backoffFactor: value ? 2.0 : 1.0,
-                  jitter: reconnect.jitter,
+              _updateConfig(
+                _config.copyWith(
+                  reconnect: ReconnectPolicy(
+                    enabled: reconnect.enabled,
+                    maxAttempts: reconnect.maxAttempts,
+                    initialDelayMs: reconnect.initialDelayMs,
+                    maxDelayMs: reconnect.maxDelayMs,
+                    backoffFactor: value ? 2.0 : 1.0,
+                    jitter: reconnect.jitter,
+                  ),
                 ),
-              ));
+              );
             },
           ),
           SwitchListTile(
-            title: const Text(
-              '抖动',
-              style: TextStyle(color: Color(0xffd7e0ee)),
-            ),
+            title: const Text('抖动', style: TextStyle(color: Color(0xffd7e0ee))),
             subtitle: const Text(
               '添加随机延迟避免重连风暴',
               style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
             ),
             value: reconnect.jitter,
-            activeColor: const Color(0xff2f6fed),
+            activeThumbColor: const Color(0xff2f6fed),
             onChanged: (value) {
-              _updateConfig(_config.copyWith(
-                reconnect: ReconnectPolicy(
-                  enabled: reconnect.enabled,
-                  maxAttempts: reconnect.maxAttempts,
-                  initialDelayMs: reconnect.initialDelayMs,
-                  maxDelayMs: reconnect.maxDelayMs,
-                  backoffFactor: reconnect.backoffFactor,
-                  jitter: value,
+              _updateConfig(
+                _config.copyWith(
+                  reconnect: ReconnectPolicy(
+                    enabled: reconnect.enabled,
+                    maxAttempts: reconnect.maxAttempts,
+                    initialDelayMs: reconnect.initialDelayMs,
+                    maxDelayMs: reconnect.maxDelayMs,
+                    backoffFactor: reconnect.backoffFactor,
+                    jitter: value,
+                  ),
                 ),
-              ));
+              );
             },
           ),
         ],
@@ -652,7 +667,7 @@ class _NetworkSettingsPageState extends State<NetworkSettingsPage> {
             style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
           ),
           value: _config.agentForwarding,
-          activeColor: const Color(0xff2f6fed),
+          activeThumbColor: const Color(0xff2f6fed),
           onChanged: (value) {
             _updateConfig(_config.copyWith(agentForwarding: value));
           },

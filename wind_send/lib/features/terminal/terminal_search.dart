@@ -72,11 +72,7 @@ class _TerminalSearchBarState extends State<TerminalSearchBar> {
 
         if (index == -1) break;
 
-        results.add(SearchResult(
-          row: row,
-          col: index,
-          length: query.length,
-        ));
+        results.add(SearchResult(row: row, col: index, length: query.length));
 
         startIndex = index + 1;
       }
@@ -115,7 +111,8 @@ class _TerminalSearchBarState extends State<TerminalSearchBar> {
   void _previousResult() {
     if (_results.isEmpty) return;
     setState(() {
-      _currentResultIndex = (_currentResultIndex - 1 + _results.length) % _results.length;
+      _currentResultIndex =
+          (_currentResultIndex - 1 + _results.length) % _results.length;
     });
     widget.onSearchResult(_results[_currentResultIndex]);
   }

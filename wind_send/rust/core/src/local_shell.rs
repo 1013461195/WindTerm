@@ -1,9 +1,9 @@
-use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use std::io::Write;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::thread::JoinHandle;
+use std::time::Instant;
 
-/// 本地 Shell 会话配置
 #[derive(Debug, Clone)]
 pub struct LocalShellConfig {
     pub shell: String,
@@ -19,7 +19,7 @@ impl Default for LocalShellConfig {
             shell: if cfg!(target_os = "windows") {
                 "cmd.exe".to_string()
             } else {
-                "/bin/bash".to_string()
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
             },
             working_dir: None,
             env_vars: Vec::new(),
@@ -29,8 +29,8 @@ impl Default for LocalShellConfig {
     }
 }
 
-/// 本地 Shell 会话状态
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum LocalShellState {
     Created,
     Running,
@@ -38,168 +38,147 @@ pub enum LocalShellState {
     Error(String),
 }
 
-/// 本地 Shell 会话
 pub struct LocalShellSession {
-    id: u64,
     config: LocalShellConfig,
     state: LocalShellState,
-    process: Option<Child>,
-    stdin: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
-    stdout: Option<Arc<Mutex<Box<dyn Read + Send>>>>,
+    child: Option<Box<dyn Child + Send + Sync>>,
+    master: Option<Box<dyn MasterPty + Send>>,
+    writer: Option<Box<dyn Write + Send>>,
+    output: Arc<Mutex<Vec<u8>>>,
+    reader_thread: Option<JoinHandle<()>>,
     last_activity: Instant,
 }
 
 impl LocalShellSession {
-    pub fn new(id: u64, config: LocalShellConfig) -> Self {
+    pub fn new(_id: u64, config: LocalShellConfig) -> Self {
         Self {
-            id,
             config,
             state: LocalShellState::Created,
-            process: None,
-            stdin: None,
-            stdout: None,
+            child: None,
+            master: None,
+            writer: None,
+            output: Arc::new(Mutex::new(Vec::new())),
+            reader_thread: None,
             last_activity: Instant::now(),
         }
-    }
-
-    pub fn id(&self) -> u64 {
-        self.id
     }
 
     pub fn state(&self) -> &LocalShellState {
         &self.state
     }
 
-    pub fn cols(&self) -> u16 {
-        self.config.cols
-    }
-
-    pub fn rows(&self) -> u16 {
-        self.config.rows
-    }
-
-    /// 启动本地 Shell
     pub fn start(&mut self) -> Result<(), String> {
-        let mut cmd = Command::new(&self.config.shell);
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: self.config.rows,
+                cols: self.config.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("创建 PTY 失败: {e}"))?;
 
-        // 设置工作目录
-        if let Some(ref dir) = self.config.working_dir {
-            cmd.current_dir(dir);
+        let mut command = CommandBuilder::new(&self.config.shell);
+        if let Some(directory) = &self.config.working_dir {
+            command.cwd(directory);
         }
-
-        // 设置环境变量
         for (key, value) in &self.config.env_vars {
-            cmd.env(key, value);
+            command.env(key, value);
         }
+        command.env("TERM", "xterm-256color");
 
-        // 设置标准输入/输出/错误
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|e| format!("启动 Shell 失败: {e}"))?;
+        drop(pair.slave);
 
-        // 启动进程
-        let mut process = cmd
-            .spawn()
-            .map_err(|e| format!("启动 Shell 失败: {}", e))?;
-
-        // 获取 stdin 和 stdout
-        let stdin = process.stdin.take()
-            .ok_or_else(|| "无法获取 stdin".to_string())?;
-        let stdout = process.stdout.take()
-            .ok_or_else(|| "无法获取 stdout".to_string())?;
-
-        self.stdin = Some(Arc::new(Mutex::new(Box::new(stdin))));
-        self.stdout = Some(Arc::new(Mutex::new(Box::new(stdout))));
-        self.process = Some(process);
-        self.state = LocalShellState::Running;
-        self.last_activity = Instant::now();
-
-        Ok(())
-    }
-
-    /// 读取输出
-    pub fn read_output(&mut self) -> Vec<u8> {
-        let mut output = Vec::new();
-
-        if let Some(stdout) = &self.stdout {
-            let mut stdout = stdout.lock().unwrap();
-            let mut buf = [0u8; 4096];
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|e| format!("克隆 PTY reader 失败: {e}"))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| format!("获取 PTY writer 失败: {e}"))?;
+        let output = Arc::clone(&self.output);
+        let reader_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 16 * 1024];
             loop {
-                match stdout.read(&mut buf) {
+                match std::io::Read::read(&mut reader, &mut buffer) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        output.extend_from_slice(&buf[..n]);
-                        self.last_activity = Instant::now();
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Ok(read) => output
+                        .lock()
+                        .expect("local shell output mutex poisoned")
+                        .extend_from_slice(&buffer[..read]),
                     Err(_) => break,
                 }
             }
-        }
+        });
 
-        // 检查进程是否退出
-        if let Some(process) = &mut self.process {
-            match process.try_wait() {
-                Ok(Some(status)) => {
-                    self.state = LocalShellState::Exited;
-                    // 读取剩余输出
-                    if let Some(stdout) = &self.stdout {
-                        let mut stdout = stdout.lock().unwrap();
-                        let mut buf = [0u8; 4096];
-                        loop {
-                            match stdout.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => output.extend_from_slice(&buf[..n]),
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    self.state = LocalShellState::Error(format!("检查进程状态失败: {}", e));
-                }
-            }
-        }
-
-        output
-    }
-
-    /// 发送输入
-    pub fn write_input(&mut self, data: &[u8]) -> Result<(), String> {
-        if let Some(stdin) = &self.stdin {
-            let mut stdin = stdin.lock().unwrap();
-            stdin
-                .write_all(data)
-                .map_err(|e| format!("写入失败: {}", e))?;
-            stdin
-                .flush()
-                .map_err(|e| format!("刷新失败: {}", e))?;
-            self.last_activity = Instant::now();
-            Ok(())
-        } else {
-            Err("stdin 未打开".to_string())
-        }
-    }
-
-    /// 调整终端大小
-    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
-        self.config.cols = cols;
-        self.config.rows = rows;
-
-        // 在 Unix 系统上，可以通过 ioctl 调整 PTY 大小
-        // 这里暂时只更新配置，实际调整需要 PTY 支持
+        self.child = Some(child);
+        self.master = Some(pair.master);
+        self.writer = Some(writer);
+        self.reader_thread = Some(reader_thread);
+        self.state = LocalShellState::Running;
+        self.last_activity = Instant::now();
         Ok(())
     }
 
-    /// 关闭会话
-    pub fn close(&mut self) {
-        if let Some(mut process) = self.process.take() {
-            let _ = process.kill();
-            let _ = process.wait();
+    pub fn read_output(&mut self) -> Vec<u8> {
+        let output = {
+            let mut buffer = self
+                .output
+                .lock()
+                .expect("local shell output mutex poisoned");
+            std::mem::take(&mut *buffer)
+        };
+        if !output.is_empty() {
+            self.last_activity = Instant::now();
         }
-        self.stdin = None;
-        self.stdout = None;
+        if let Some(child) = &mut self.child {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                self.state = LocalShellState::Exited;
+            }
+        }
+        output
+    }
+
+    pub fn write_input(&mut self, data: &[u8]) -> Result<(), String> {
+        let writer = self.writer.as_mut().ok_or("PTY writer 未打开")?;
+        writer
+            .write_all(data)
+            .and_then(|_| writer.flush())
+            .map_err(|e| format!("写入 PTY 失败: {e}"))?;
+        self.last_activity = Instant::now();
+        Ok(())
+    }
+
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
+        self.config.cols = cols;
+        self.config.rows = rows;
+        self.master
+            .as_ref()
+            .ok_or("PTY 未打开")?
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| format!("调整 PTY 大小失败: {e}"))
+    }
+
+    pub fn close(&mut self) {
+        self.writer.take();
+        self.master.take();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.child.take();
+        if let Some(thread) = self.reader_thread.take() {
+            let _ = thread.join();
+        }
         self.state = LocalShellState::Exited;
     }
 }

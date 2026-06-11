@@ -10,6 +10,7 @@ void main() {
     expect(find.text('Rust core bridge'), findsOneWidget);
     expect(find.text('新建 SSH 连接'), findsOneWidget);
     expect(find.text('新建本地 Shell'), findsOneWidget);
+    expect(find.text('新建 Telnet / TCP / Serial'), findsOneWidget);
     expect(find.byIcon(Icons.add_rounded), findsOneWidget);
   });
 

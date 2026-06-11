@@ -7,7 +7,20 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-ssh2 = "0.9"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 vte = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+aes-gcm = "0.10"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+portable-pty = "0.9"
+serialport = "4.9"
+base64 = "0.22"
+encoding_rs = "0.8"
+keyring = "3"
+ed25519-dalek = "2"
+sha2 = "0.10"
+unicode-width = "0.2"

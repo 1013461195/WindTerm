@@ -52,6 +52,15 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
+set(RUST_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../rust")
+add_custom_target(rust_core ALL
+  COMMAND cargo build
+    --manifest-path "${RUST_CORE_DIR}/Cargo.toml"
+    --profile $<IF:$<CONFIG:Debug>,dev,release>
+  WORKING_DIRECTORY "${RUST_CORE_DIR}"
+  COMMENT "Building Rust core"
+)
+add_dependencies(${BINARY_NAME} rust_core)
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
@@ -80,6 +89,9 @@ install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}
 
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
+install(FILES
+  "${RUST_CORE_DIR}/target/$<IF:$<CONFIG:Debug>,debug,release>/rust_core.dll"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
 
 if(PLUGIN_BUNDLED_LIBRARIES)
   install(FILES "${PLUGIN_BUNDLED_LIBRARIES}"

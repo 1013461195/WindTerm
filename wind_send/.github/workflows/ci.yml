@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  flutter:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+      - run: cargo build --manifest-path rust/Cargo.toml --release
+      - run: flutter build macos --release
+
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssh2-1-dev libudev-dev pkg-config
+      - run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path rust/Cargo.toml --all-targets
+      - run: cargo clippy --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+
+  desktop:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y
+          clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+          libssh2-1-dev libudev-dev libsecret-1-dev
+      - run: flutter pub get
+      - name: Build Linux release
+        if: runner.os == 'Linux'
+        run: flutter build linux --release
+      - name: Build Windows release
+        if: runner.os == 'Windows'
+        run: flutter build windows --release
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-cyclonedx
+      - run: cargo audit --file rust/Cargo.lock
+      - run: cargo deny --manifest-path rust/Cargo.toml check advisories bans sources
+      - run: cargo cyclonedx --manifest-path rust/Cargo.toml --format json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-sbom
+          path: rust/Cargo.cdx.json

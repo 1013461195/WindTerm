@@ -45,39 +45,56 @@ class _CommandPaletteState extends State<CommandPalette> {
 
     // 会话
     for (final profile in widget.profiles) {
-      items.add(_CommandItem(
-        icon: profile.type == SessionProfileType.ssh
-            ? Icons.cloud_rounded
-            : Icons.terminal_rounded,
-        label: profile.name,
-        description: profile.host ?? profile.shell ?? '',
-        type: _CommandItemType.session,
-        profile: profile,
-      ));
+      items.add(
+        _CommandItem(
+          icon: profile.type == SessionProfileType.ssh
+              ? Icons.cloud_rounded
+              : Icons.terminal_rounded,
+          label: profile.name,
+          description: profile.host ?? profile.shell ?? '',
+          type: _CommandItemType.session,
+          profile: profile,
+        ),
+      );
     }
 
     // 命令
-    items.add(_CommandItem(
-      icon: Icons.add_rounded,
-      label: '新建 SSH 连接',
-      description: '创建新的 SSH 会话',
-      type: _CommandItemType.command,
-      command: 'new_ssh',
-    ));
-    items.add(_CommandItem(
-      icon: Icons.terminal_rounded,
-      label: '新建本地 Shell',
-      description: '创建新的本地终端',
-      type: _CommandItemType.command,
-      command: 'new_shell',
-    ));
-    items.add(_CommandItem(
-      icon: Icons.settings_rounded,
-      label: '打开设置',
-      description: '配置终端选项',
-      type: _CommandItemType.command,
-      command: 'settings',
-    ));
+    items.add(
+      _CommandItem(
+        icon: Icons.add_rounded,
+        label: '新建 SSH 连接',
+        description: '创建新的 SSH 会话',
+        type: _CommandItemType.command,
+        command: 'new_ssh',
+      ),
+    );
+    items.add(
+      _CommandItem(
+        icon: Icons.system_update_rounded,
+        label: '检查更新',
+        description: '检查并验证签名更新',
+        type: _CommandItemType.command,
+        command: 'check_updates',
+      ),
+    );
+    items.add(
+      _CommandItem(
+        icon: Icons.terminal_rounded,
+        label: '新建本地 Shell',
+        description: '创建新的本地终端',
+        type: _CommandItemType.command,
+        command: 'new_shell',
+      ),
+    );
+    items.add(
+      _CommandItem(
+        icon: Icons.settings_rounded,
+        label: '打开设置',
+        description: '配置终端选项',
+        type: _CommandItemType.command,
+        command: 'settings',
+      ),
+    );
 
     setState(() {
       _filteredItems = items;
@@ -93,38 +110,55 @@ class _CommandPaletteState extends State<CommandPalette> {
 
     final allItems = <_CommandItem>[];
     for (final profile in widget.profiles) {
-      allItems.add(_CommandItem(
-        icon: profile.type == SessionProfileType.ssh
-            ? Icons.cloud_rounded
-            : Icons.terminal_rounded,
-        label: profile.name,
-        description: profile.host ?? profile.shell ?? '',
-        type: _CommandItemType.session,
-        profile: profile,
-      ));
+      allItems.add(
+        _CommandItem(
+          icon: profile.type == SessionProfileType.ssh
+              ? Icons.cloud_rounded
+              : Icons.terminal_rounded,
+          label: profile.name,
+          description: profile.host ?? profile.shell ?? '',
+          type: _CommandItemType.session,
+          profile: profile,
+        ),
+      );
     }
 
-    allItems.add(_CommandItem(
-      icon: Icons.add_rounded,
-      label: '新建 SSH 连接',
-      description: '创建新的 SSH 会话',
-      type: _CommandItemType.command,
-      command: 'new_ssh',
-    ));
-    allItems.add(_CommandItem(
-      icon: Icons.terminal_rounded,
-      label: '新建本地 Shell',
-      description: '创建新的本地终端',
-      type: _CommandItemType.command,
-      command: 'new_shell',
-    ));
-    allItems.add(_CommandItem(
-      icon: Icons.settings_rounded,
-      label: '打开设置',
-      description: '配置终端选项',
-      type: _CommandItemType.command,
-      command: 'settings',
-    ));
+    allItems.add(
+      _CommandItem(
+        icon: Icons.add_rounded,
+        label: '新建 SSH 连接',
+        description: '创建新的 SSH 会话',
+        type: _CommandItemType.command,
+        command: 'new_ssh',
+      ),
+    );
+    allItems.add(
+      _CommandItem(
+        icon: Icons.system_update_rounded,
+        label: '检查更新',
+        description: '检查并验证签名更新',
+        type: _CommandItemType.command,
+        command: 'check_updates',
+      ),
+    );
+    allItems.add(
+      _CommandItem(
+        icon: Icons.terminal_rounded,
+        label: '新建本地 Shell',
+        description: '创建新的本地终端',
+        type: _CommandItemType.command,
+        command: 'new_shell',
+      ),
+    );
+    allItems.add(
+      _CommandItem(
+        icon: Icons.settings_rounded,
+        label: '打开设置',
+        description: '配置终端选项',
+        type: _CommandItemType.command,
+        command: 'settings',
+      ),
+    );
 
     setState(() {
       _filteredItems = allItems.where((item) {
@@ -191,10 +225,7 @@ class _CommandPaletteState extends State<CommandPalette> {
             ),
             child: const Text(
               'ESC',
-              style: TextStyle(
-                color: Color(0xff4a5568),
-                fontSize: 10,
-              ),
+              style: TextStyle(color: Color(0xff4a5568), fontSize: 10),
             ),
           ),
         ],
@@ -205,10 +236,7 @@ class _CommandPaletteState extends State<CommandPalette> {
   Widget _buildResultsList() {
     if (_filteredItems.isEmpty) {
       return const Center(
-        child: Text(
-          '没有匹配的结果',
-          style: TextStyle(color: Color(0xff4a5568)),
-        ),
+        child: Text('没有匹配的结果', style: TextStyle(color: Color(0xff4a5568))),
       );
     }
 
@@ -265,10 +293,7 @@ class _CommandPaletteState extends State<CommandPalette> {
                 ),
                 child: const Text(
                   'Enter',
-                  style: TextStyle(
-                    color: Color(0xff4a5568),
-                    fontSize: 10,
-                  ),
+                  style: TextStyle(color: Color(0xff4a5568), fontSize: 10),
                 ),
               ),
           ],
@@ -278,10 +303,7 @@ class _CommandPaletteState extends State<CommandPalette> {
   }
 }
 
-enum _CommandItemType {
-  session,
-  command,
-}
+enum _CommandItemType { session, command }
 
 class _CommandItem {
   final IconData icon;

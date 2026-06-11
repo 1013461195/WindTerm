@@ -1,9 +1,5 @@
 /// 代理类型
-enum ProxyType {
-  none,
-  http,
-  socks5,
-}
+enum ProxyType { none, http, socks5 }
 
 /// 代理配置
 class ProxyConfig {
@@ -83,11 +79,7 @@ class JumpHostConfig {
 }
 
 /// 端口转发类型
-enum PortForwardType {
-  local,
-  remote,
-  dynamic,
-}
+enum PortForwardType { local, remote, dynamic }
 
 /// 端口转发配置
 class PortForwardConfig {
@@ -213,6 +205,7 @@ class ReconnectPolicy {
 /// 网络配置
 class NetworkConfig {
   final ProxyConfig? proxy;
+  final String? proxyCommand;
   final List<JumpHostConfig> jumpHosts;
   final List<PortForwardConfig> portForwards;
   final KeepaliveConfig keepalive;
@@ -221,6 +214,7 @@ class NetworkConfig {
 
   const NetworkConfig({
     this.proxy,
+    this.proxyCommand,
     this.jumpHosts = const [],
     this.portForwards = const [],
     this.keepalive = const KeepaliveConfig(),
@@ -230,6 +224,9 @@ class NetworkConfig {
 
   NetworkConfig copyWith({
     ProxyConfig? proxy,
+    bool clearProxy = false,
+    String? proxyCommand,
+    bool clearProxyCommand = false,
     List<JumpHostConfig>? jumpHosts,
     List<PortForwardConfig>? portForwards,
     KeepaliveConfig? keepalive,
@@ -237,7 +234,10 @@ class NetworkConfig {
     bool? agentForwarding,
   }) {
     return NetworkConfig(
-      proxy: proxy ?? this.proxy,
+      proxy: clearProxy ? null : proxy ?? this.proxy,
+      proxyCommand: clearProxyCommand
+          ? null
+          : proxyCommand ?? this.proxyCommand,
       jumpHosts: jumpHosts ?? this.jumpHosts,
       portForwards: portForwards ?? this.portForwards,
       keepalive: keepalive ?? this.keepalive,
@@ -249,6 +249,7 @@ class NetworkConfig {
   Map<String, dynamic> toJson() {
     return {
       'proxy': proxy?.toJson(),
+      'proxyCommand': proxyCommand,
       'jumpHosts': jumpHosts.map((e) => e.toJson()).toList(),
       'portForwards': portForwards.map((e) => e.toJson()).toList(),
       'keepalive': keepalive.toJson(),
@@ -259,14 +260,15 @@ class NetworkConfig {
 
   factory NetworkConfig.fromJson(Map<String, dynamic> json) {
     return NetworkConfig(
-      proxy: json['proxy'] != null
-          ? ProxyConfig.fromJson(json['proxy'])
-          : null,
-      jumpHosts: (json['jumpHosts'] as List?)
+      proxy: json['proxy'] != null ? ProxyConfig.fromJson(json['proxy']) : null,
+      proxyCommand: json['proxyCommand'],
+      jumpHosts:
+          (json['jumpHosts'] as List?)
               ?.map((e) => JumpHostConfig.fromJson(e))
               .toList() ??
           [],
-      portForwards: (json['portForwards'] as List?)
+      portForwards:
+          (json['portForwards'] as List?)
               ?.map((e) => PortForwardConfig.fromJson(e))
               .toList() ??
           [],

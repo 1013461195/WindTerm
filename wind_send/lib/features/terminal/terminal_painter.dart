@@ -106,7 +106,16 @@ class SelectionPosition {
 class TerminalView extends StatefulWidget {
   final TerminalSnapshot? snapshot;
   final void Function(String text)? onSelectionChanged;
-  final void Function(TerminalMouseEventType eventType, TerminalMouseButton button, int col, int row, bool shift, bool meta, bool ctrl)? onMouseEvent;
+  final void Function(
+    TerminalMouseEventType eventType,
+    TerminalMouseButton button,
+    int col,
+    int row,
+    bool shift,
+    bool meta,
+    bool ctrl,
+  )?
+  onMouseEvent;
   final TerminalSettings settings;
   final SearchResult? searchResult;
 
@@ -163,10 +172,16 @@ class _TerminalViewState extends State<TerminalView> {
     if (col < 0 || row < 0) return null;
     if (col >= widget.snapshot!.cols) return null;
 
-    final allLines = [...widget.snapshot!.scrollback, ...widget.snapshot!.lines];
+    final allLines = [
+      ...widget.snapshot!.scrollback,
+      ...widget.snapshot!.lines,
+    ];
     final totalLines = allLines.length;
     final visibleRows = widget.snapshot!.rows;
-    final startRow = (totalLines - visibleRows - _scrollOffset).clamp(0, totalLines);
+    final startRow = (totalLines - visibleRows - _scrollOffset).clamp(
+      0,
+      totalLines,
+    );
     final actualRow = startRow + row;
 
     if (actualRow >= totalLines) return null;
@@ -202,7 +217,11 @@ class _TerminalViewState extends State<TerminalView> {
     _sendMouseEvent(event.localPosition, TerminalMouseEventType.release, event);
   }
 
-  void _sendMouseEvent(Offset position, TerminalMouseEventType eventType, PointerEvent event) {
+  void _sendMouseEvent(
+    Offset position,
+    TerminalMouseEventType eventType,
+    PointerEvent event,
+  ) {
     if (widget.onMouseEvent == null || widget.snapshot == null) return;
 
     const cellWidth = 8.0;
@@ -213,7 +232,10 @@ class _TerminalViewState extends State<TerminalView> {
     final col = ((position.dx - leftPadding) / cellWidth).floor();
     final row = ((position.dy - topPadding) / cellHeight).floor();
 
-    if (col < 0 || row < 0 || col >= widget.snapshot!.cols || row >= widget.snapshot!.rows) {
+    if (col < 0 ||
+        row < 0 ||
+        col >= widget.snapshot!.cols ||
+        row >= widget.snapshot!.rows) {
       return;
     }
 
@@ -246,27 +268,42 @@ class _TerminalViewState extends State<TerminalView> {
   }
 
   void _notifySelection() {
-    if (_selectionStart == null || _selectionEnd == null || widget.snapshot == null) {
+    if (_selectionStart == null ||
+        _selectionEnd == null ||
+        widget.snapshot == null) {
       return;
     }
 
-    final allLines = [...widget.snapshot!.scrollback, ...widget.snapshot!.lines];
+    final allLines = [
+      ...widget.snapshot!.scrollback,
+      ...widget.snapshot!.lines,
+    ];
     final start = _selectionStart!;
     final end = _selectionEnd!;
 
     // 确保 start 在 end 之前
-    final bool startIsBefore = start.row < end.row ||
-        (start.row == end.row && start.col <= end.col);
+    final bool startIsBefore =
+        start.row < end.row || (start.row == end.row && start.col <= end.col);
     final actualStart = startIsBefore ? start : end;
     final actualEnd = startIsBefore ? end : start;
 
     final buffer = StringBuffer();
-    for (int row = actualStart.row; row <= actualEnd.row && row < allLines.length; row++) {
+    for (
+      int row = actualStart.row;
+      row <= actualEnd.row && row < allLines.length;
+      row++
+    ) {
       final line = allLines[row];
       final startCol = row == actualStart.row ? actualStart.col : 0;
-      final endCol = row == actualEnd.row ? actualEnd.col : line.cells.length - 1;
+      final endCol = row == actualEnd.row
+          ? actualEnd.col
+          : line.cells.length - 1;
 
-      for (int col = startCol; col <= endCol && col < line.cells.length; col++) {
+      for (
+        int col = startCol;
+        col <= endCol && col < line.cells.length;
+        col++
+      ) {
         final cell = line.cells[col];
         if (cell.wide != 2) {
           buffer.write(cell.ch == ' ' ? ' ' : cell.ch);
@@ -286,26 +323,41 @@ class _TerminalViewState extends State<TerminalView> {
 
   /// 获取当前选中的文本
   String? getSelectedText() {
-    if (_selectionStart == null || _selectionEnd == null || widget.snapshot == null) {
+    if (_selectionStart == null ||
+        _selectionEnd == null ||
+        widget.snapshot == null) {
       return null;
     }
 
-    final allLines = [...widget.snapshot!.scrollback, ...widget.snapshot!.lines];
+    final allLines = [
+      ...widget.snapshot!.scrollback,
+      ...widget.snapshot!.lines,
+    ];
     final start = _selectionStart!;
     final end = _selectionEnd!;
 
-    final bool startIsBefore = start.row < end.row ||
-        (start.row == end.row && start.col <= end.col);
+    final bool startIsBefore =
+        start.row < end.row || (start.row == end.row && start.col <= end.col);
     final actualStart = startIsBefore ? start : end;
     final actualEnd = startIsBefore ? end : start;
 
     final buffer = StringBuffer();
-    for (int row = actualStart.row; row <= actualEnd.row && row < allLines.length; row++) {
+    for (
+      int row = actualStart.row;
+      row <= actualEnd.row && row < allLines.length;
+      row++
+    ) {
       final line = allLines[row];
       final startCol = row == actualStart.row ? actualStart.col : 0;
-      final endCol = row == actualEnd.row ? actualEnd.col : line.cells.length - 1;
+      final endCol = row == actualEnd.row
+          ? actualEnd.col
+          : line.cells.length - 1;
 
-      for (int col = startCol; col <= endCol && col < line.cells.length; col++) {
+      for (
+        int col = startCol;
+        col <= endCol && col < line.cells.length;
+        col++
+      ) {
         final cell = line.cells[col];
         if (cell.wide != 2) {
           buffer.write(cell.ch == ' ' ? ' ' : cell.ch);
@@ -326,13 +378,22 @@ class _TerminalViewState extends State<TerminalView> {
       onPointerSignal: _onPointerSignal,
       child: GestureDetector(
         onTapDown: (details) => _onPointerDown(
-          PointerDownEvent(position: details.localPosition, kind: PointerDeviceKind.mouse),
+          PointerDownEvent(
+            position: details.localPosition,
+            kind: PointerDeviceKind.mouse,
+          ),
         ),
         onPanStart: (details) => _onPointerDown(
-          PointerDownEvent(position: details.localPosition, kind: PointerDeviceKind.mouse),
+          PointerDownEvent(
+            position: details.localPosition,
+            kind: PointerDeviceKind.mouse,
+          ),
         ),
         onPanUpdate: (details) => _onPointerMove(
-          PointerMoveEvent(position: details.localPosition, kind: PointerDeviceKind.mouse),
+          PointerMoveEvent(
+            position: details.localPosition,
+            kind: PointerDeviceKind.mouse,
+          ),
         ),
         onPanEnd: (details) => _onPointerUp(
           PointerUpEvent(position: Offset.zero, kind: PointerDeviceKind.mouse),
@@ -680,10 +741,7 @@ class TerminalPainter extends CustomPainter {
     final y = _topPadding + visibleRow * _cellHeight;
     final width = result.length * _cellWidth;
 
-    canvas.drawRect(
-      Rect.fromLTWH(x, y, width, _cellHeight),
-      searchPaint,
-    );
+    canvas.drawRect(Rect.fromLTWH(x, y, width, _cellHeight), searchPaint);
   }
 
   /// 绘制选区高亮
@@ -700,8 +758,8 @@ class TerminalPainter extends CustomPainter {
     final end = selectionEnd!;
 
     // 确保 start 在 end 之前
-    final bool startIsBefore = start.row < end.row ||
-        (start.row == end.row && start.col <= end.col);
+    final bool startIsBefore =
+        start.row < end.row || (start.row == end.row && start.col <= end.col);
     final actualStart = startIsBefore ? start : end;
     final actualEnd = startIsBefore ? end : start;
 

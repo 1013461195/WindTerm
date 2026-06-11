@@ -2,17 +2,10 @@ import 'dart:convert';
 import 'dart:io';
 
 /// 会话配置类型
-enum SessionProfileType {
-  ssh,
-  localShell,
-}
+enum SessionProfileType { ssh, localShell }
 
 /// SSH 认证方式
-enum SshAuthType {
-  password,
-  privateKey,
-  keyboardInteractive,
-}
+enum SshAuthType { password, privateKey, keyboardInteractive }
 
 /// 会话配置
 class SessionProfile {
@@ -28,6 +21,8 @@ class SessionProfile {
   final String? username;
   final SshAuthType? authType;
   final String? privateKeyPath;
+  final String? credentialId;
+  final String? credentialStorage;
 
   // 本地 Shell 配置
   final String? shell;
@@ -48,6 +43,7 @@ class SessionProfile {
 
   // 快捷命令
   final List<String> quickCommands;
+  final String? tabColor;
 
   const SessionProfile({
     required this.id,
@@ -60,6 +56,8 @@ class SessionProfile {
     this.username,
     this.authType,
     this.privateKeyPath,
+    this.credentialId,
+    this.credentialStorage,
     this.shell,
     this.workingDir,
     this.term,
@@ -70,6 +68,7 @@ class SessionProfile {
     this.logging = false,
     this.logPath,
     this.quickCommands = const [],
+    this.tabColor,
   });
 
   SessionProfile copyWith({
@@ -83,6 +82,8 @@ class SessionProfile {
     String? username,
     SshAuthType? authType,
     String? privateKeyPath,
+    String? credentialId,
+    String? credentialStorage,
     String? shell,
     String? workingDir,
     String? term,
@@ -93,6 +94,7 @@ class SessionProfile {
     bool? logging,
     String? logPath,
     List<String>? quickCommands,
+    String? tabColor,
   }) {
     return SessionProfile(
       id: id ?? this.id,
@@ -105,6 +107,8 @@ class SessionProfile {
       username: username ?? this.username,
       authType: authType ?? this.authType,
       privateKeyPath: privateKeyPath ?? this.privateKeyPath,
+      credentialId: credentialId ?? this.credentialId,
+      credentialStorage: credentialStorage ?? this.credentialStorage,
       shell: shell ?? this.shell,
       workingDir: workingDir ?? this.workingDir,
       term: term ?? this.term,
@@ -115,6 +119,7 @@ class SessionProfile {
       logging: logging ?? this.logging,
       logPath: logPath ?? this.logPath,
       quickCommands: quickCommands ?? this.quickCommands,
+      tabColor: tabColor ?? this.tabColor,
     );
   }
 
@@ -130,6 +135,8 @@ class SessionProfile {
       'username': username,
       'authType': authType?.name,
       'privateKeyPath': privateKeyPath,
+      'credentialId': credentialId,
+      'credentialStorage': credentialStorage,
       'shell': shell,
       'workingDir': workingDir,
       'term': term,
@@ -140,6 +147,7 @@ class SessionProfile {
       'logging': logging,
       'logPath': logPath,
       'quickCommands': quickCommands,
+      'tabColor': tabColor,
     };
   }
 
@@ -163,6 +171,8 @@ class SessionProfile {
             )
           : null,
       privateKeyPath: json['privateKeyPath'],
+      credentialId: json['credentialId'],
+      credentialStorage: json['credentialStorage'],
       shell: json['shell'],
       workingDir: json['workingDir'],
       term: json['term'],
@@ -173,6 +183,7 @@ class SessionProfile {
       logging: json['logging'] ?? false,
       logPath: json['logPath'],
       quickCommands: List<String>.from(json['quickCommands'] ?? []),
+      tabColor: json['tabColor'],
     );
   }
 }

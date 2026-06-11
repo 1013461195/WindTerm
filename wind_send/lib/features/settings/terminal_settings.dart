@@ -40,6 +40,7 @@ class TerminalSettings {
 
   /// 主题名称
   final String themeName;
+  final double windowOpacity;
 
   const TerminalSettings({
     this.fontSize = 13,
@@ -55,6 +56,7 @@ class TerminalSettings {
     this.cursorColor = const Color(0xffd7e0ee),
     this.selectionColor = const Color(0xff2f6fed),
     this.themeName = 'default',
+    this.windowOpacity = 1.0,
   });
 
   TerminalSettings copyWith({
@@ -71,6 +73,7 @@ class TerminalSettings {
     Color? cursorColor,
     Color? selectionColor,
     String? themeName,
+    double? windowOpacity,
   }) {
     return TerminalSettings(
       fontSize: fontSize ?? this.fontSize,
@@ -86,6 +89,48 @@ class TerminalSettings {
       cursorColor: cursorColor ?? this.cursorColor,
       selectionColor: selectionColor ?? this.selectionColor,
       themeName: themeName ?? this.themeName,
+      windowOpacity: windowOpacity ?? this.windowOpacity,
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'fontSize': fontSize,
+    'lineHeight': lineHeight,
+    'fontFamily': fontFamily,
+    'fontFamilyFallback': fontFamilyFallback,
+    'cellWidth': cellWidth,
+    'cellHeight': cellHeight,
+    'leftPadding': leftPadding,
+    'topPadding': topPadding,
+    'backgroundColor': backgroundColor.toARGB32(),
+    'foregroundColor': foregroundColor.toARGB32(),
+    'cursorColor': cursorColor.toARGB32(),
+    'selectionColor': selectionColor.toARGB32(),
+    'themeName': themeName,
+    'windowOpacity': windowOpacity,
+  };
+
+  factory TerminalSettings.fromJson(Map<String, dynamic> json) {
+    Color color(String key, Color fallback) =>
+        json[key] is int ? Color(json[key] as int) : fallback;
+    return TerminalSettings(
+      fontSize: (json['fontSize'] as num?)?.toDouble() ?? 13,
+      lineHeight: (json['lineHeight'] as num?)?.toDouble() ?? 1,
+      fontFamily: json['fontFamily'] as String? ?? 'Menlo',
+      fontFamilyFallback: List<String>.from(
+        json['fontFamilyFallback'] ??
+            const ['Consolas', 'Courier New', 'monospace'],
+      ),
+      cellWidth: (json['cellWidth'] as num?)?.toDouble() ?? 8,
+      cellHeight: (json['cellHeight'] as num?)?.toDouble() ?? 16,
+      leftPadding: (json['leftPadding'] as num?)?.toDouble() ?? 4,
+      topPadding: (json['topPadding'] as num?)?.toDouble() ?? 4,
+      backgroundColor: color('backgroundColor', const Color(0xff05070a)),
+      foregroundColor: color('foregroundColor', const Color(0xffd7e0ee)),
+      cursorColor: color('cursorColor', const Color(0xffd7e0ee)),
+      selectionColor: color('selectionColor', const Color(0xff2f6fed)),
+      themeName: json['themeName'] as String? ?? 'default',
+      windowOpacity: (json['windowOpacity'] as num?)?.toDouble() ?? 1.0,
     );
   }
 }

@@ -1,6 +1,57 @@
 use vte::{Parser, Perform};
 use serde::{Deserialize, Serialize};
 
+/// 鼠标跟踪模式
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MouseTrackingMode {
+    /// 无跟踪
+    None,
+    /// 普通模式（X10）
+    Normal,
+    /// 按钮事件模式
+    Button,
+    /// 任意事件模式
+    Any,
+}
+
+/// 鼠标事件编码格式
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MouseEncoding {
+    /// X10 编码（默认）
+    X10,
+    /// SGR 编码（扩展）
+    SGR,
+}
+
+/// 鼠标事件类型
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MouseEventType {
+    Press,
+    Release,
+    Motion,
+}
+
+/// 鼠标按键
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    None,
+}
+
+/// 鼠标事件
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MouseEvent {
+    pub event_type: MouseEventType,
+    pub button: MouseButton,
+    pub col: usize,
+    pub row: usize,
+    pub shift: bool,
+    pub meta: bool,
+    pub ctrl: bool,
+}
+
 /// 终端颜色
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Color {
@@ -146,6 +197,14 @@ pub struct Terminal {
     scroll_bottom: usize,
     /// 插入模式
     insert_mode: bool,
+    /// 鼠标跟踪模式
+    mouse_tracking_mode: MouseTrackingMode,
+    /// 鼠标按键跟踪模式（SGR 扩展）
+    mouse_button_tracking: bool,
+    /// 鼠标运动跟踪模式
+    mouse_motion_tracking: bool,
+    /// 鼠标所有事件跟踪模式
+    mouse_any_event_tracking: bool,
 }
 
 impl Terminal {
@@ -169,6 +228,10 @@ impl Terminal {
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             insert_mode: false,
+            mouse_tracking_mode: MouseTrackingMode::None,
+            mouse_button_tracking: false,
+            mouse_motion_tracking: false,
+            mouse_any_event_tracking: false,
         }
     }
 
@@ -414,6 +477,102 @@ impl Terminal {
     fn scroll_down_n(&mut self, n: usize) {
         for _ in 0..n {
             self.scroll_down();
+        }
+    }
+
+    /// 编码鼠标事件为终端转义序列
+    pub fn encode_mouse_event(&self, event: &MouseEvent) -> Vec<u8> {
+        if self.mouse_tracking_mode == MouseTrackingMode::None {
+            return Vec::new();
+        }
+
+        // 检查事件类型是否需要发送
+        match event.event_type {
+            MouseEventType::Press | MouseEventType::Release => {
+                if self.mouse_tracking_mode == MouseTrackingMode::None {
+                    return Vec::new();
+                }
+            }
+            MouseEventType::Motion => {
+                if !self.mouse_motion_tracking && !self.mouse_any_event_tracking {
+                    return Vec::new();
+                }
+            }
+        }
+
+        // 使用 SGR 编码（支持扩展）
+        let button = match event.button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::None => 3,
+        };
+
+        let mut cb = button;
+        if event.event_type == MouseEventType::Press {
+            cb |= 0; // 按下
+        } else if event.event_type == MouseEventType::Release {
+            cb |= 0x40; // 释放（SGR 扩展）
+        }
+
+        if event.shift {
+            cb |= 4;
+        }
+        if event.meta {
+            cb |= 8;
+        }
+        if event.ctrl {
+            cb |= 16;
+        }
+
+        // SGR 编码格式: CSI < Cb ; Cx ; Cy M/m
+        let mut seq = Vec::new();
+        seq.extend_from_slice(b"\x1b[<");
+        seq.extend_from_slice(cb.to_string().as_bytes());
+        seq.push(b';');
+        seq.extend_from_slice((event.col + 1).to_string().as_bytes());
+        seq.push(b';');
+        seq.extend_from_slice((event.row + 1).to_string().as_bytes());
+        if event.event_type == MouseEventType::Release {
+            seq.push(b'm'); // SGR 释放
+        } else {
+            seq.push(b'M'); // SGR 按下
+        }
+        seq
+    }
+
+    /// 设置鼠标跟踪模式
+    pub fn set_mouse_tracking(&mut self, mode: MouseTrackingMode) {
+        self.mouse_tracking_mode = mode;
+    }
+
+    /// 设置鼠标按键跟踪
+    pub fn set_mouse_button_tracking(&mut self, enabled: bool) {
+        self.mouse_button_tracking = enabled;
+        if enabled {
+            self.mouse_tracking_mode = MouseTrackingMode::Button;
+        } else if self.mouse_tracking_mode == MouseTrackingMode::Button {
+            self.mouse_tracking_mode = MouseTrackingMode::None;
+        }
+    }
+
+    /// 设置鼠标运动跟踪
+    pub fn set_mouse_motion_tracking(&mut self, enabled: bool) {
+        self.mouse_motion_tracking = enabled;
+        if enabled {
+            self.mouse_tracking_mode = MouseTrackingMode::Any;
+        } else if self.mouse_tracking_mode == MouseTrackingMode::Any {
+            self.mouse_tracking_mode = MouseTrackingMode::None;
+        }
+    }
+
+    /// 设置鼠标所有事件跟踪
+    pub fn set_mouse_any_event_tracking(&mut self, enabled: bool) {
+        self.mouse_any_event_tracking = enabled;
+        if enabled {
+            self.mouse_tracking_mode = MouseTrackingMode::Any;
+        } else if self.mouse_tracking_mode == MouseTrackingMode::Any {
+            self.mouse_tracking_mode = MouseTrackingMode::None;
         }
     }
 
@@ -768,6 +927,22 @@ impl<'a> Perform for TerminalPerformer<'a> {
                                 7 => {} // 自动换行模式 (DECAWM) - 默认开启
                                 1 => {} // 应用光标键模式
                                 12 => {} // 光标闪烁
+                                1000 => {
+                                    // 启用鼠标按键跟踪（X10 模式）
+                                    self.terminal.set_mouse_tracking(MouseTrackingMode::Normal);
+                                }
+                                1002 => {
+                                    // 启用鼠标按键事件跟踪
+                                    self.terminal.set_mouse_button_tracking(true);
+                                }
+                                1003 => {
+                                    // 启用鼠标所有事件跟踪
+                                    self.terminal.set_mouse_any_event_tracking(true);
+                                }
+                                1006 => {
+                                    // 启用 SGR 鼠标编码
+                                    // 暂不实现，使用默认编码
+                                }
                                 1049 => {
                                     // 切换到备用屏幕缓冲区
                                     self.terminal.save_cursor();
@@ -798,6 +973,21 @@ impl<'a> Perform for TerminalPerformer<'a> {
                                 25 => self.terminal.cursor_visible = false,
                                 7 => {} // 关闭自动换行
                                 1 => {} // 关闭应用光标键模式
+                                1000 => {
+                                    // 禁用鼠标跟踪
+                                    self.terminal.set_mouse_tracking(MouseTrackingMode::None);
+                                }
+                                1002 => {
+                                    // 禁用鼠标按键事件跟踪
+                                    self.terminal.set_mouse_button_tracking(false);
+                                }
+                                1003 => {
+                                    // 禁用鼠标所有事件跟踪
+                                    self.terminal.set_mouse_any_event_tracking(false);
+                                }
+                                1006 => {
+                                    // 禁用 SGR 鼠标编码
+                                }
                                 1049 => {
                                     // 从备用屏幕缓冲区切回
                                     self.terminal.restore_cursor();

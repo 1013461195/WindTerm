@@ -8,9 +8,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'core_bridge/rust_core.dart';
+import 'features/network/network_config.dart';
+import 'features/network/network_settings_page.dart';
+import 'features/security/security_config.dart';
+import 'features/security/security_settings_page.dart';
 import 'features/session/session_editor.dart';
+import 'features/session/session_manager.dart';
+import 'features/session/session_profile.dart';
+import 'features/session/session_tree.dart';
+import 'features/session/command_palette.dart';
+import 'features/sftp/sftp_panel.dart';
+import 'features/settings/settings_page.dart';
+import 'features/settings/terminal_settings.dart';
 import 'features/terminal/terminal_painter.dart';
 import 'features/terminal/terminal_input.dart';
+import 'features/terminal/terminal_search.dart';
 
 // ── FFI 类型签名（与 rust_core.dart 保持一致） ──
 
@@ -118,33 +130,118 @@ class ShellWorkspace extends StatefulWidget {
 
 class _ShellWorkspaceState extends State<ShellWorkspace> {
   final RustCore _core = RustCore.load();
-  SshSession? _currentSession;
+  late final SessionManager _sessionManager;
   TerminalSnapshot? _snapshot;
-  Timer? _pollTimer;
   late final TerminalInputHandler _inputHandler;
   final _focusNode = FocusNode();
   bool _connecting = false;
   int _lastCols = 0;
   int _lastRows = 0;
+  String? _selectedText;
+  TerminalSettings _settings = const TerminalSettings();
+  bool _showSearch = false;
+  SearchResult? _searchResult;
+  bool _showSftp = false;
+  SftpSession? _sftpSession;
+  final SessionProfileStore _profileStore = SessionProfileStore('.');
+  NetworkConfig _networkConfig = const NetworkConfig();
+  SecurityConfig _securityConfig = const SecurityConfig();
 
   @override
   void initState() {
     super.initState();
-    _inputHandler = TerminalInputHandler(onInput: _handleInput);
+    _sessionManager = SessionManager(
+      core: _core,
+      onSessionsChanged: _onSessionsChanged,
+      onActiveSessionChanged: _onActiveSessionChanged,
+      onSnapshotUpdated: _onSnapshotUpdated,
+    );
+    _inputHandler = TerminalInputHandler(
+      onInput: _handleInput,
+      onCopy: _handleCopy,
+      onPaste: _handlePaste,
+    );
+    _loadProfiles();
+  }
+
+  Future<void> _loadProfiles() async {
+    try {
+      await _profileStore.load();
+      setState(() {});
+    } catch (e) {
+      // 忽略加载错误
+    }
   }
 
   @override
   void dispose() {
-    _pollTimer?.cancel();
-    _currentSession?.close();
+    _sessionManager.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
   void _handleInput(Uint8List data) {
-    if (_currentSession != null) {
-      _currentSession!.writeBytes(data);
+    _sessionManager.writeBytes(data);
+  }
+
+  void _handleCopy() {
+    final text = _selectedText;
+    if (text != null && text.isNotEmpty) {
+      Clipboard.setData(ClipboardData(text: text));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已复制到剪贴板'),
+          duration: Duration(seconds: 1),
+        ),
+      );
     }
+  }
+
+  void _handlePaste() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (data?.text != null) {
+      _sessionManager.writeInput(data!.text!);
+    }
+  }
+
+  void _onSelectionChanged(String text) {
+    _selectedText = text;
+  }
+
+  void _onMouseEvent(
+    TerminalMouseEventType eventType,
+    TerminalMouseButton button,
+    int col,
+    int row,
+    bool shift,
+    bool meta,
+    bool ctrl,
+  ) {
+    _sessionManager.sendMouseEvent(
+      eventType: eventType,
+      button: button,
+      col: col,
+      row: row,
+      shift: shift,
+      meta: meta,
+      ctrl: ctrl,
+    );
+  }
+
+  void _onSessionsChanged(List<SessionInfo> sessions) {
+    setState(() {});
+  }
+
+  void _onActiveSessionChanged(int activeIndex) {
+    setState(() {
+      _snapshot = _sessionManager.activeSession?.snapshot;
+    });
+  }
+
+  void _onSnapshotUpdated(TerminalSnapshot snapshot) {
+    setState(() {
+      _snapshot = snapshot;
+    });
   }
 
   void _openSessionEditor() {
@@ -161,8 +258,6 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
 
   /// 终端区域大小变化时，计算新的行列数并通知 Rust 调整 PTY 大小
   void _onTerminalResize(double width, double height) {
-    if (_currentSession == null) return;
-
     // 与 terminal_painter.dart 中的常量保持一致
     const cellWidth = 8.0;
     const cellHeight = 16.0;
@@ -175,7 +270,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     if (cols > 0 && rows > 0 && (cols != _lastCols || rows != _lastRows)) {
       _lastCols = cols;
       _lastRows = rows;
-      _currentSession!.resize(cols, rows);
+      _sessionManager.resize(cols, rows);
     }
   }
 
@@ -201,22 +296,26 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
         throw Exception('连接失败: 返回会话 ID 为 0');
       }
 
-      final session = SshSession(sessionId, _core);
+      // 添加到会话管理器
+      await _sessionManager.addSshSession(
+        name: '${config.username}@${config.host}',
+        host: config.host,
+        port: config.port,
+        username: config.username,
+        password: config.password,
+      );
 
-      setState(() {
-        _currentSession = session;
-        _connecting = false;
-      });
+      setState(() => _connecting = false);
 
       // 启动轮询
-      _startPolling();
+      _sessionManager.startPolling();
 
       // 获取焦点以便接收键盘输入
       _focusNode.requestFocus();
 
       // 连接成功后发送初始终端大小（如果 LayoutBuilder 已经触发过）
       if (_lastCols > 0 && _lastRows > 0) {
-        session.resize(_lastCols, _lastRows);
+        _sessionManager.resize(_lastCols, _lastRows);
       }
     } catch (e) {
       setState(() => _connecting = false);
@@ -231,27 +330,172 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     }
   }
 
-  void _startPolling() {
-    _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (_currentSession == null) return;
+  void _disconnect() {
+    _sessionManager.removeSession(_sessionManager.activeSessionIndex);
+  }
 
-      final snapshot = _currentSession!.readOutput();
-      if (snapshot != null) {
-        setState(() {
-          _snapshot = snapshot;
-        });
+  void _addLocalShell() {
+    _sessionManager.addLocalShellSession(
+      name: '本地 Shell ${_sessionManager.sessions.length + 1}',
+    );
+    _sessionManager.startPolling();
+    _focusNode.requestFocus();
+  }
+
+  void _openSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => SettingsPage(
+          settings: _settings,
+          onSettingsChanged: (newSettings) {
+            setState(() {
+              _settings = newSettings;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _showSearch = !_showSearch;
+      if (!_showSearch) {
+        _searchResult = null;
       }
     });
   }
 
-  void _disconnect() {
-    _pollTimer?.cancel();
-    _currentSession?.close();
+  void _onSearchResult(SearchResult? result) {
     setState(() {
-      _currentSession = null;
-      _snapshot = null;
+      _searchResult = result;
     });
+  }
+
+  void _closeSearch() {
+    setState(() {
+      _showSearch = false;
+      _searchResult = null;
+    });
+  }
+
+  void _toggleSftp() {
+    if (_showSftp) {
+      setState(() {
+        _showSftp = false;
+        _sftpSession?.close();
+        _sftpSession = null;
+      });
+    } else {
+      // 打开 SFTP 面板（需要已连接的 SSH 会话）
+      if (_sessionManager.activeSession?.type == SessionType.ssh) {
+        try {
+          final sftp = _core.openSftp(_sessionManager.activeSession!.id);
+          setState(() {
+            _sftpSession = sftp;
+            _showSftp = true;
+          });
+        } catch (e) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('打开 SFTP 失败: $e'),
+              backgroundColor: Colors.redAccent,
+            ),
+          );
+        }
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('请先连接 SSH 会话'),
+            backgroundColor: Colors.orangeAccent,
+          ),
+        );
+      }
+    }
+  }
+
+  void _openCommandPalette() {
+    showDialog(
+      context: context,
+      builder: (context) => CommandPalette(
+        profiles: _profileStore.profiles,
+        onSessionSelected: (profile) {
+          // 从配置启动会话
+          if (profile.type == SessionProfileType.ssh && profile.host != null) {
+            _openSessionEditor();
+          } else if (profile.type == SessionProfileType.localShell) {
+            _addLocalShell();
+          }
+        },
+        onCommand: (command) {
+          switch (command) {
+            case 'new_ssh':
+              _openSessionEditor();
+              break;
+            case 'new_shell':
+              _addLocalShell();
+              break;
+            case 'settings':
+              _openSettings();
+              break;
+          }
+        },
+      ),
+    );
+  }
+
+  void _openNetworkSettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => NetworkSettingsPage(
+          config: _networkConfig,
+          onConfigChanged: (newConfig) {
+            setState(() {
+              _networkConfig = newConfig;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  void _openSecuritySettings() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (context) => SecuritySettingsPage(
+          config: _securityConfig,
+          onConfigChanged: (newConfig) {
+            setState(() {
+              _securityConfig = newConfig;
+            });
+          },
+        ),
+      ),
+    );
+  }
+
+  void _saveSessionAsProfile(SessionInfo session) {
+    final profile = SessionProfile(
+      id: session.id.toString(),
+      name: session.name,
+      type: session.type == SessionType.ssh
+          ? SessionProfileType.ssh
+          : SessionProfileType.localShell,
+    );
+    _profileStore.add(profile);
+    _profileStore.save();
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('会话已保存: ${session.name}')),
+    );
+  }
+
+  void _connectFromProfile(SessionProfile profile) {
+    if (profile.type == SessionProfileType.ssh && profile.host != null) {
+      _openSessionEditor();
+    } else if (profile.type == SessionProfileType.localShell) {
+      _addLocalShell();
+    }
   }
 
   @override
@@ -260,54 +504,113 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       body: Row(
         children: <Widget>[
           _SessionRail(
-            currentSession: _currentSession,
+            sessions: _sessionManager.sessions,
+            activeSessionIndex: _sessionManager.activeSessionIndex,
+            savedProfiles: _profileStore.profiles,
             onNewSession: _openSessionEditor,
+            onNewLocalShell: _addLocalShell,
             onDisconnect: _disconnect,
+            onSessionSelected: (index) {
+              _sessionManager.setActiveSession(index);
+              _focusNode.requestFocus();
+            },
+            onProfileTap: _connectFromProfile,
+            onSettings: _openSettings,
+            onNetworkSettings: _openNetworkSettings,
+            onSecuritySettings: _openSecuritySettings,
+            onSftp: _toggleSftp,
             connecting: _connecting,
+            showSftp: _showSftp,
           ),
           Expanded(
             child: Column(
               children: <Widget>[
+                _TabBar(
+                  sessions: _sessionManager.sessions,
+                  activeIndex: _sessionManager.activeSessionIndex,
+                  onTabSelected: (index) {
+                    _sessionManager.setActiveSession(index);
+                    _focusNode.requestFocus();
+                  },
+                  onTabClosed: (index) {
+                    _sessionManager.removeSession(index);
+                  },
+                ),
                 _TopBar(
                   core: _core,
-                  session: _currentSession,
+                  session: _sessionManager.activeSession,
                   connecting: _connecting,
+                  onSearch: _toggleSearch,
                 ),
+                if (_showSearch)
+                  TerminalSearchBar(
+                    snapshot: _snapshot,
+                    onSearchResult: _onSearchResult,
+                    onClose: _closeSearch,
+                  ),
                 Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                    child: _connecting
-                        ? const Center(
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                CircularProgressIndicator(
-                                  color: Color(0xff2f6fed),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                          child: _connecting
+                              ? const Center(
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      CircularProgressIndicator(
+                                        color: Color(0xff2f6fed),
+                                      ),
+                                      SizedBox(height: 16),
+                                      Text(
+                                        '正在连接...',
+                                        style: TextStyle(color: Color(0xff8e98a8)),
+                                      ),
+                                    ],
+                                  ),
+                                )
+                              : LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    // 终端区域大小变化时，调整 PTY 大小
+                                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                                      _onTerminalResize(
+                                        constraints.maxWidth,
+                                        constraints.maxHeight,
+                                      );
+                                    });
+                                    return KeyboardListener(
+                                      focusNode: _focusNode,
+                                      onKeyEvent: (event) {
+                                        // Ctrl+P 打开命令面板
+                                        if (event is KeyDownEvent &&
+                                            event.logicalKey == LogicalKeyboardKey.keyP &&
+                                            HardwareKeyboard.instance.isControlPressed) {
+                                          _openCommandPalette();
+                                          return;
+                                        }
+                                        _inputHandler.handleKeyEvent(event);
+                                      },
+                                      child: TerminalView(
+                                        snapshot: _snapshot,
+                                        onSelectionChanged: _onSelectionChanged,
+                                        onMouseEvent: _onMouseEvent,
+                                        settings: _settings,
+                                        searchResult: _searchResult,
+                                      ),
+                                    );
+                                  },
                                 ),
-                                SizedBox(height: 16),
-                                Text(
-                                  '正在连接...',
-                                  style: TextStyle(color: Color(0xff8e98a8)),
-                                ),
-                              ],
-                            ),
-                          )
-                        : LayoutBuilder(
-                            builder: (context, constraints) {
-                              // 终端区域大小变化时，调整 PTY 大小
-                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                _onTerminalResize(
-                                  constraints.maxWidth,
-                                  constraints.maxHeight,
-                                );
-                              });
-                              return KeyboardListener(
-                                focusNode: _focusNode,
-                                onKeyEvent: _inputHandler.handleKeyEvent,
-                                child: TerminalView(snapshot: _snapshot),
-                              );
-                            },
+                        ),
+                      ),
+                      if (_showSftp && _sftpSession != null)
+                        SizedBox(
+                          width: 320,
+                          child: SftpPanel(
+                            sftpSession: _sftpSession,
                           ),
+                        ),
+                    ],
                   ),
                 ),
               ],
@@ -320,16 +623,36 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
 }
 
 class _SessionRail extends StatelessWidget {
-  final SshSession? currentSession;
+  final List<SessionInfo> sessions;
+  final int activeSessionIndex;
+  final List<SessionProfile> savedProfiles;
   final VoidCallback onNewSession;
+  final VoidCallback onNewLocalShell;
   final VoidCallback onDisconnect;
+  final void Function(int index) onSessionSelected;
+  final void Function(SessionProfile profile) onProfileTap;
+  final VoidCallback onSettings;
+  final VoidCallback onNetworkSettings;
+  final VoidCallback onSecuritySettings;
+  final VoidCallback onSftp;
   final bool connecting;
+  final bool showSftp;
 
   const _SessionRail({
-    this.currentSession,
+    required this.sessions,
+    required this.activeSessionIndex,
+    required this.savedProfiles,
     required this.onNewSession,
+    required this.onNewLocalShell,
     required this.onDisconnect,
+    required this.onSessionSelected,
+    required this.onProfileTap,
+    required this.onSettings,
+    required this.onNetworkSettings,
+    required this.onSecuritySettings,
+    required this.onSftp,
     this.connecting = false,
+    this.showSftp = false,
   });
 
   @override
@@ -353,45 +676,96 @@ class _SessionRail extends StatelessWidget {
             ),
             _NavItem(
               icon: Icons.add_rounded,
-              label: connecting ? '连接中...' : '新建连接',
+              label: connecting ? '连接中...' : '新建 SSH 连接',
               selected: false,
               onTap: connecting ? () {} : onNewSession,
             ),
-            if (currentSession != null) ...[
+            _NavItem(
+              icon: Icons.terminal_rounded,
+              label: '新建本地 Shell',
+              selected: false,
+              onTap: onNewLocalShell,
+            ),
+            if (sessions.isNotEmpty) ...[
               const Divider(color: Color(0xff2a303b), height: 28),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 18),
                 child: Text(
-                  '当前会话',
+                  '活动会话 (${sessions.length})',
                   style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
                 ),
               ),
-              _NavItem(
-                icon: Icons.terminal_rounded,
-                label: 'SSH Session #${currentSession!.id}',
-                selected: true,
-                onTap: () {},
+              ...sessions.asMap().entries.map((entry) {
+                final index = entry.key;
+                final session = entry.value;
+                final isActive = index == activeSessionIndex;
+                final icon = session.type == SessionType.ssh
+                    ? Icons.cloud_rounded
+                    : Icons.terminal_rounded;
+                return _NavItem(
+                  icon: icon,
+                  label: session.name,
+                  selected: isActive,
+                  onTap: () => onSessionSelected(index),
+                );
+              }),
+              if (activeSessionIndex >= 0)
+                _NavItem(
+                  icon: Icons.close_rounded,
+                  label: '关闭当前会话',
+                  selected: false,
+                  onTap: onDisconnect,
+                ),
+            ],
+            if (savedProfiles.isNotEmpty) ...[
+              const Divider(color: Color(0xff2a303b), height: 28),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                child: Text(
+                  '已保存会话 (${savedProfiles.length})',
+                  style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
+                ),
               ),
-              _NavItem(
-                icon: Icons.close_rounded,
-                label: '断开连接',
-                selected: false,
-                onTap: onDisconnect,
+              Expanded(
+                child: SessionTree(
+                  profiles: savedProfiles,
+                  onSessionTap: onProfileTap,
+                  onSessionEdit: (profile) {},
+                  onSessionDelete: (profile) {},
+                ),
               ),
             ],
+            const Divider(color: Color(0xff2a303b), height: 28),
+            _NavItem(
+              icon: Icons.folder_rounded,
+              label: showSftp ? '关闭 SFTP' : 'SFTP 文件管理',
+              selected: showSftp,
+              onTap: onSftp,
+            ),
+            _NavItem(
+              icon: Icons.settings_rounded,
+              label: '终端设置',
+              selected: false,
+              onTap: onSettings,
+            ),
+            _NavItem(
+              icon: Icons.wifi_rounded,
+              label: '网络设置',
+              selected: false,
+              onTap: onNetworkSettings,
+            ),
+            _NavItem(
+              icon: Icons.security_rounded,
+              label: '安全设置',
+              selected: false,
+              onTap: onSecuritySettings,
+            ),
             const Divider(color: Color(0xff2a303b), height: 28),
             const Padding(
               padding: EdgeInsets.symmetric(horizontal: 18),
               child: Text(
-                'Phase 1 - SSH MVP',
-                style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
-              ),
-            ),
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 8, 18, 0),
-              child: Text(
-                'Rust SSH → VTE Terminal → Flutter',
-                style: TextStyle(color: Color(0xffc4cad4), height: 1.35),
+                'Ctrl+P 命令面板',
+                style: TextStyle(color: Color(0xff4a5568), fontSize: 11),
               ),
             ),
           ],
@@ -444,12 +818,102 @@ class _NavItem extends StatelessWidget {
   }
 }
 
+class _TabBar extends StatelessWidget {
+  final List<SessionInfo> sessions;
+  final int activeIndex;
+  final void Function(int index) onTabSelected;
+  final void Function(int index) onTabClosed;
+
+  const _TabBar({
+    required this.sessions,
+    required this.activeIndex,
+    required this.onTabSelected,
+    required this.onTabClosed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (sessions.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      height: 36,
+      decoration: const BoxDecoration(
+        color: Color(0xff191d25),
+        border: Border(bottom: BorderSide(color: Color(0xff2a303b))),
+      ),
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        itemCount: sessions.length,
+        itemBuilder: (context, index) {
+          final session = sessions[index];
+          final isActive = index == activeIndex;
+          final icon = session.type == SessionType.ssh
+              ? Icons.cloud_rounded
+              : Icons.terminal_rounded;
+
+          return GestureDetector(
+            onTap: () => onTabSelected(index),
+            child: Container(
+              constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? const Color(0xff263247)
+                    : Colors.transparent,
+                border: Border(
+                  right: BorderSide(color: const Color(0xff2a303b)),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 14, color: const Color(0xff8fb6ff)),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      session.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: isActive
+                            ? const Color(0xffd7e0ee)
+                            : const Color(0xff8e98a8),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: () => onTabClosed(index),
+                    child: Icon(
+                      Icons.close_rounded,
+                      size: 14,
+                      color: const Color(0xff8e98a8),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _TopBar extends StatelessWidget {
   final RustCore core;
-  final SshSession? session;
+  final SessionInfo? session;
   final bool connecting;
+  final VoidCallback? onSearch;
 
-  const _TopBar({required this.core, this.session, this.connecting = false});
+  const _TopBar({
+    required this.core,
+    this.session,
+    this.connecting = false,
+    this.onSearch,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -457,9 +921,16 @@ class _TopBar extends StatelessWidget {
     if (connecting) {
       statusText = 'connecting...';
     } else if (session != null) {
-      statusText = session!.getState();
+      statusText = session!.state;
     } else {
       statusText = 'disconnected';
+    }
+
+    final String sessionName;
+    if (session != null) {
+      sessionName = session!.name;
+    } else {
+      sessionName = 'Rust core bridge';
     }
 
     return Container(
@@ -470,12 +941,17 @@ class _TopBar extends StatelessWidget {
           const Icon(Icons.memory_rounded, size: 18, color: Color(0xff8fb6ff)),
           const SizedBox(width: 10),
           Text(
-            session != null
-                ? 'SSH Session #${session!.id}'
-                : 'Rust core bridge',
+            sessionName,
             style: const TextStyle(fontWeight: FontWeight.w700),
           ),
           const Spacer(),
+          if (onSearch != null)
+            IconButton(
+              icon: const Icon(Icons.search_rounded, size: 18),
+              color: const Color(0xff8e98a8),
+              onPressed: onSearch,
+              tooltip: '搜索',
+            ),
           Container(
             height: 28,
             padding: const EdgeInsets.symmetric(horizontal: 10),

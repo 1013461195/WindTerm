@@ -3,8 +3,10 @@ import 'package:flutter/services.dart';
 /// 终端输入处理器
 class TerminalInputHandler {
   final void Function(Uint8List data) onInput;
+  final void Function()? onCopy;
+  final void Function()? onPaste;
 
-  TerminalInputHandler({required this.onInput});
+  TerminalInputHandler({required this.onInput, this.onCopy, this.onPaste});
 
   /// 处理键盘事件
   bool handleKeyEvent(KeyEvent event) {
@@ -19,6 +21,18 @@ class TerminalInputHandler {
         HardwareKeyboard.instance.isAltPressed ||
         HardwareKeyboard.instance.isMetaPressed;
     final shift = HardwareKeyboard.instance.isShiftPressed;
+
+    // ── Ctrl+Shift+C: 复制选中文本到剪贴板 ──
+    if (ctrl && shift && key == LogicalKeyboardKey.keyC) {
+      onCopy?.call();
+      return true;
+    }
+
+    // ── Ctrl+Shift+V: 从剪贴板粘贴 ──
+    if (ctrl && shift && key == LogicalKeyboardKey.keyV) {
+      onPaste?.call();
+      return true;
+    }
 
     // ── Ctrl + 字母/符号 ──
     if (ctrl && !alt) {

@@ -63,6 +63,8 @@ pub struct SessionConfig {
     pub passphrase: Option<String>,
     pub known_hosts_path: Option<String>,
     pub accept_unknown_host: bool,
+    pub connect_timeout_ms: u64,
+    pub terminal_type: String,
     pub network: NetworkConfig,
 }
 
@@ -89,6 +91,7 @@ pub struct SshSession {
 impl SshSession {
     pub fn new(id: u64, config: SessionConfig) -> Self {
         let connection_config = ConnectionConfig {
+            connect_timeout: Duration::from_millis(config.connect_timeout_ms.max(1000)),
             max_reconnect_attempts: if config.network.reconnect.enabled {
                 config.network.reconnect.max_attempts
             } else {
@@ -211,8 +214,11 @@ impl SshSession {
 
     /// 打开 SFTP 会话
     pub fn open_sftp(&self) -> Result<crate::sftp::SftpSession, String> {
-        let session = self.session.as_ref().ok_or("SSH session 未打开")?;
-        crate::sftp::SftpSession::new(session)
+        if self.session.is_none() {
+            return Err("SSH session 未打开".to_string());
+        }
+        let session = self.connect_authenticated_session()?;
+        crate::sftp::SftpSession::new(&session)
     }
 
     /// 直接连接
@@ -507,7 +513,56 @@ impl SshSession {
     pub fn connect(&mut self) -> Result<(), String> {
         self.state = SessionState::Connecting;
         self.last_error = None;
+        let session = self.connect_authenticated_session()?;
+        self.state = SessionState::Authenticating;
 
+        // 打开 channel
+        let mut channel = session
+            .channel_session()
+            .map_err(|e| format!("打开 channel 失败: {}", e))?;
+        if self.config.network.agent_forwarding {
+            channel
+                .request_auth_agent_forwarding()
+                .map_err(|e| format!("启用 agent forwarding 失败: {e}"))?;
+        }
+
+        // 请求 PTY
+        channel
+            .request_pty(
+                &self.config.terminal_type,
+                None,
+                Some((self.cols as u32, self.rows as u32, 0, 0)),
+            )
+            .map_err(|e| format!("请求 PTY 失败: {}", e))?;
+
+        // 请求 shell
+        channel
+            .shell()
+            .map_err(|e| format!("请求 shell 失败: {}", e))?;
+
+        // 所有阻塞操作完成，设置非阻塞模式用于后续 read_output
+        session.set_blocking(false);
+        self.forwarding_stop = Arc::new(AtomicBool::new(false));
+        let (threads, metrics) = start_port_forwards(
+            &session,
+            &self.config.network.port_forwards,
+            &self.forwarding_stop,
+        )?;
+        self.forwarding_threads = threads;
+        self.forwarding_metrics = metrics;
+
+        self.session = Some(session);
+        self.channel = Some(channel);
+        self.state = SessionState::Running;
+        self.last_activity = Instant::now();
+
+        // 启动读取线程
+        self.start_read_thread();
+
+        Ok(())
+    }
+
+    fn connect_authenticated_session(&self) -> Result<Session, String> {
         // 根据网络配置建立连接
         let tcp = if let Some(command) = self
             .config
@@ -540,7 +595,6 @@ impl SshSession {
             session.set_keepalive(true, self.config.network.keepalive.interval_seconds.max(1));
         }
         self.verify_host_key(&session)?;
-        self.state = SessionState::Authenticating;
 
         if let Some(private_key_path) = &self.config.private_key_path {
             session
@@ -562,51 +616,7 @@ impl SshSession {
         if !session.authenticated() {
             return Err("认证失败".to_string());
         }
-
-        // 打开 channel
-        let mut channel = session
-            .channel_session()
-            .map_err(|e| format!("打开 channel 失败: {}", e))?;
-        if self.config.network.agent_forwarding {
-            channel
-                .request_auth_agent_forwarding()
-                .map_err(|e| format!("启用 agent forwarding 失败: {e}"))?;
-        }
-
-        // 请求 PTY
-        channel
-            .request_pty(
-                "xterm-256color",
-                None,
-                Some((self.cols as u32, self.rows as u32, 0, 0)),
-            )
-            .map_err(|e| format!("请求 PTY 失败: {}", e))?;
-
-        // 请求 shell
-        channel
-            .shell()
-            .map_err(|e| format!("请求 shell 失败: {}", e))?;
-
-        // 所有阻塞操作完成，设置非阻塞模式用于后续 read_output
-        session.set_blocking(false);
-        self.forwarding_stop = Arc::new(AtomicBool::new(false));
-        let (threads, metrics) = start_port_forwards(
-            &session,
-            &self.config.network.port_forwards,
-            &self.forwarding_stop,
-        )?;
-        self.forwarding_threads = threads;
-        self.forwarding_metrics = metrics;
-
-        self.session = Some(session);
-        self.channel = Some(channel);
-        self.state = SessionState::Running;
-        self.last_activity = Instant::now();
-
-        // 启动读取线程
-        self.start_read_thread();
-
-        Ok(())
+        Ok(session)
     }
 
     fn verify_host_key(&self, session: &Session) -> Result<(), String> {
@@ -1079,6 +1089,9 @@ fn read_socks5_target(socket: &TcpStream) -> Result<(String, u16), String> {
     let mut stream = socket
         .try_clone()
         .map_err(|e| format!("克隆 SOCKS5 客户端失败: {e}"))?;
+    stream
+        .set_nonblocking(false)
+        .map_err(|e| format!("设置 SOCKS5 握手模式失败: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|e| e.to_string())?;

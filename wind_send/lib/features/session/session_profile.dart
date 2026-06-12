@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 /// 会话配置类型
-enum SessionProfileType { ssh, localShell }
+enum SessionProfileType { ssh, rdp, telnet, tunnel, vnc, localShell }
 
 /// SSH 认证方式
 enum SshAuthType { password, privateKey, keyboardInteractive }
@@ -23,6 +23,10 @@ class SessionProfile {
   final String? privateKeyPath;
   final String? credentialId;
   final String? credentialStorage;
+  final String? authIdentityId;
+  final String? targetHost;
+  final int? targetPort;
+  final Map<String, Object?> sshOptions;
 
   // 本地 Shell 配置
   final String? shell;
@@ -58,6 +62,10 @@ class SessionProfile {
     this.privateKeyPath,
     this.credentialId,
     this.credentialStorage,
+    this.authIdentityId,
+    this.targetHost,
+    this.targetPort,
+    this.sshOptions = const <String, Object?>{},
     this.shell,
     this.workingDir,
     this.term,
@@ -84,6 +92,10 @@ class SessionProfile {
     String? privateKeyPath,
     String? credentialId,
     String? credentialStorage,
+    String? authIdentityId,
+    String? targetHost,
+    int? targetPort,
+    Map<String, Object?>? sshOptions,
     String? shell,
     String? workingDir,
     String? term,
@@ -109,6 +121,10 @@ class SessionProfile {
       privateKeyPath: privateKeyPath ?? this.privateKeyPath,
       credentialId: credentialId ?? this.credentialId,
       credentialStorage: credentialStorage ?? this.credentialStorage,
+      authIdentityId: authIdentityId ?? this.authIdentityId,
+      targetHost: targetHost ?? this.targetHost,
+      targetPort: targetPort ?? this.targetPort,
+      sshOptions: sshOptions ?? this.sshOptions,
       shell: shell ?? this.shell,
       workingDir: workingDir ?? this.workingDir,
       term: term ?? this.term,
@@ -137,6 +153,10 @@ class SessionProfile {
       'privateKeyPath': privateKeyPath,
       'credentialId': credentialId,
       'credentialStorage': credentialStorage,
+      'authIdentityId': authIdentityId,
+      'targetHost': targetHost,
+      'targetPort': targetPort,
+      'sshOptions': sshOptions,
       'shell': shell,
       'workingDir': workingDir,
       'term': term,
@@ -173,6 +193,10 @@ class SessionProfile {
       privateKeyPath: json['privateKeyPath'],
       credentialId: json['credentialId'],
       credentialStorage: json['credentialStorage'],
+      authIdentityId: json['authIdentityId'],
+      targetHost: json['targetHost'],
+      targetPort: json['targetPort'],
+      sshOptions: Map<String, Object?>.from(json['sshOptions'] ?? const {}),
       shell: json['shell'],
       workingDir: json['workingDir'],
       term: json['term'],

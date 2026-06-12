@@ -39,8 +39,20 @@ struct OpenSessionRequest {
     known_hosts_path: Option<String>,
     #[serde(default)]
     accept_unknown_host: bool,
+    #[serde(default = "default_connect_timeout_ms")]
+    connect_timeout_ms: u64,
+    #[serde(default = "default_terminal_type")]
+    terminal_type: String,
     #[serde(default)]
     network: network::NetworkConfig,
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    15_000
+}
+
+fn default_terminal_type() -> String {
+    "xterm-256color".to_string()
 }
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -138,6 +150,8 @@ pub unsafe extern "C" fn core_session_open(
         passphrase: None,
         known_hosts_path: None,
         accept_unknown_host: false,
+        connect_timeout_ms: default_connect_timeout_ms(),
+        terminal_type: default_terminal_type(),
         network: network::NetworkConfig::default(),
     };
 
@@ -177,6 +191,8 @@ pub unsafe extern "C" fn core_session_open_json(request_json: *const c_char) -> 
         passphrase: request.passphrase,
         known_hosts_path: request.known_hosts_path,
         accept_unknown_host: request.accept_unknown_host,
+        connect_timeout_ms: request.connect_timeout_ms,
+        terminal_type: request.terminal_type,
         network: request.network,
     })
 }

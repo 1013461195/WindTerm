@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 
+import '../security/auth_identity.dart';
+import 'session_profile.dart';
+
 enum SshAuthentication { password, privateKey }
 
 /// SSH 连接配置
@@ -13,6 +16,8 @@ class SshConfig {
   String passphrase;
   bool acceptUnknownHost;
   bool rememberCredential;
+  int connectTimeoutMs;
+  String terminalType;
 
   SshConfig({
     this.host = '',
@@ -24,6 +29,8 @@ class SshConfig {
     this.passphrase = '',
     this.acceptUnknownHost = false,
     this.rememberCredential = false,
+    this.connectTimeoutMs = 15000,
+    this.terminalType = 'xterm-256color',
   });
 
   Map<String, Object?> toJson({
@@ -42,6 +49,8 @@ class SshConfig {
         : null,
     'known_hosts_path': null,
     'accept_unknown_host': acceptUnknownHost,
+    'connect_timeout_ms': connectTimeoutMs,
+    'terminal_type': terminalType,
     'network': network,
   };
 }
@@ -49,9 +58,20 @@ class SshConfig {
 /// SSH 连接编辑器对话框
 class SessionEditor extends StatefulWidget {
   final SshConfig? initialConfig;
+  final List<AuthIdentity> identities;
+  final Future<AuthIdentitySecret?> Function(AuthIdentity identity)?
+  onLoadIdentity;
+  final VoidCallback? onManageIdentities;
   final void Function(SshConfig config) onConnect;
 
-  const SessionEditor({super.key, this.initialConfig, required this.onConnect});
+  const SessionEditor({
+    super.key,
+    this.initialConfig,
+    this.identities = const <AuthIdentity>[],
+    this.onLoadIdentity,
+    this.onManageIdentities,
+    required this.onConnect,
+  });
 
   @override
   State<SessionEditor> createState() => _SessionEditorState();
@@ -66,6 +86,8 @@ class _SessionEditorState extends State<SessionEditor> {
   late final TextEditingController _passphraseController;
   late SshAuthentication _authentication;
   late bool _rememberCredential;
+  String? _identityId;
+  bool _loadingIdentity = false;
   final _formKey = GlobalKey<FormState>();
 
   @override
@@ -105,8 +127,33 @@ class _SessionEditorState extends State<SessionEditor> {
         passphrase: _passphraseController.text,
         acceptUnknownHost: false,
         rememberCredential: _rememberCredential,
+        connectTimeoutMs: widget.initialConfig?.connectTimeoutMs ?? 15000,
+        terminalType: widget.initialConfig?.terminalType ?? 'xterm-256color',
       );
       widget.onConnect(config);
+    }
+  }
+
+  Future<void> _selectIdentity(String? id) async {
+    setState(() => _identityId = id);
+    if (id == null) return;
+    final identity = widget.identities.firstWhere((value) => value.id == id);
+    setState(() => _loadingIdentity = true);
+    try {
+      final secret = await widget.onLoadIdentity?.call(identity);
+      if (!mounted || secret == null) return;
+      setState(() {
+        _usernameController.text = identity.username;
+        _authentication = identity.authType == SshAuthType.privateKey
+            ? SshAuthentication.privateKey
+            : SshAuthentication.password;
+        _privateKeyController.text = identity.privateKeyPath ?? '';
+        _passwordController.text = secret.password;
+        _passphraseController.text = secret.passphrase;
+        _rememberCredential = false;
+      });
+    } finally {
+      if (mounted) setState(() => _loadingIdentity = false);
     }
   }
 
@@ -132,6 +179,41 @@ class _SessionEditorState extends State<SessionEditor> {
                 ),
               ),
               const SizedBox(height: 24),
+              if (widget.identities.isNotEmpty ||
+                  widget.onManageIdentities != null) ...[
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String?>(
+                        initialValue: _identityId,
+                        decoration: const InputDecoration(labelText: '认证身份'),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                            value: null,
+                            child: Text('手动输入'),
+                          ),
+                          ...widget.identities.map(
+                            (identity) => DropdownMenuItem<String?>(
+                              value: identity.id,
+                              child: Text(identity.name),
+                            ),
+                          ),
+                        ],
+                        onChanged: _loadingIdentity ? null : _selectIdentity,
+                      ),
+                    ),
+                    if (widget.onManageIdentities != null) ...[
+                      const SizedBox(width: 8),
+                      IconButton(
+                        onPressed: widget.onManageIdentities,
+                        icon: const Icon(Icons.manage_accounts_outlined),
+                        tooltip: '管理认证身份',
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 16),
+              ],
               _buildTextField(
                 controller: _hostController,
                 label: '主机',

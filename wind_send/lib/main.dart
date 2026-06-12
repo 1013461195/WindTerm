@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:isolate';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:ffi/ffi.dart';
@@ -11,15 +12,17 @@ import 'package:flutter/services.dart';
 import 'core_bridge/rust_core.dart';
 import 'features/network/network_config.dart';
 import 'features/network/network_settings_page.dart';
-import 'features/protocol/protocol_session_editor.dart';
+import 'features/protocol/protocol_config.dart';
 import 'features/security/security_config.dart';
 import 'features/security/security_settings_page.dart';
+import 'features/security/auth_identity.dart';
+import 'features/security/auth_identity_manager.dart';
+import 'features/session/connection_hub.dart';
 import 'features/session/session_editor.dart';
 import 'features/session/session_manager.dart';
 import 'features/session/session_productivity.dart';
 import 'features/session/session_profile.dart';
-import 'features/session/session_profile_editor.dart';
-import 'features/session/session_tree.dart';
+import 'features/session/ssh_profile_editor.dart';
 import 'features/session/command_palette.dart';
 import 'features/sftp/sftp_panel.dart';
 import 'features/settings/settings_page.dart';
@@ -137,7 +140,9 @@ void main() {
 }
 
 class WindSendApp extends StatelessWidget {
-  const WindSendApp({super.key});
+  const WindSendApp({super.key, this.requireSecuritySetup = true});
+
+  final bool requireSecuritySetup;
 
   @override
   Widget build(BuildContext context) {
@@ -152,13 +157,15 @@ class WindSendApp extends StatelessWidget {
         scaffoldBackgroundColor: const Color(0xff111318),
         useMaterial3: true,
       ),
-      home: const ShellWorkspace(),
+      home: ShellWorkspace(requireSecuritySetup: requireSecuritySetup),
     );
   }
 }
 
 class ShellWorkspace extends StatefulWidget {
-  const ShellWorkspace({super.key});
+  const ShellWorkspace({super.key, this.requireSecuritySetup = true});
+
+  final bool requireSecuritySetup;
 
   @override
   State<ShellWorkspace> createState() => _ShellWorkspaceState();
@@ -189,16 +196,22 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   SecurityConfig _securityConfig = const SecurityConfig();
   late final AuditLogger _auditLogger;
   late final CredentialStore _credentialStore;
+  late final AuthIdentityStore _identityStore;
   late final UpdateService _updateService;
   String? _masterPassword;
+  String? _unlockVerifier;
+  bool _securityReady = false;
   bool _restoringWorkspace = false;
   final Set<int> _reconnectInFlight = {};
   bool _splitPane = false;
   bool _syncInput = false;
+  bool _showConnectionHub = true;
+  List<String> _connectionGroups = <String>[];
 
   @override
   void initState() {
     super.initState();
+    _securityReady = !widget.requireSecuritySetup;
     _profileStore = SessionProfileStore(_dataDirectory);
     _workspaceStore = WorkspaceStore(_dataDirectory);
     _appConfigStore = AppConfigStore(_dataDirectory);
@@ -220,6 +233,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       _core,
       vaultDirectory: '$_dataDirectory/vault',
     );
+    _identityStore = AuthIdentityStore(_dataDirectory);
     _updateService = UpdateService(_core, dataDirectory: _dataDirectory);
     _inputHandler = TerminalInputHandler(
       onInput: _handleInput,
@@ -237,6 +251,8 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       final settings = await _appConfigStore.load();
       final terminal = settings['terminal'];
       final security = settings['security'];
+      final connectionGroups = settings['connectionGroups'];
+      final securityBootstrap = settings['securityBootstrap'];
       if (terminal is Map<String, dynamic>) {
         _settings = TerminalSettings.fromJson(terminal);
         unawaited(_applyWindowOpacity(_settings.windowOpacity));
@@ -245,7 +261,29 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
         _securityConfig = SecurityConfig.fromJson(security);
         _auditLogger.configure(_securityConfig);
       }
+      if (connectionGroups is List) {
+        _connectionGroups =
+            connectionGroups
+                .whereType<String>()
+                .map((group) => group.trim())
+                .where((group) => group.isNotEmpty)
+                .toSet()
+                .toList()
+              ..sort();
+      }
+      if (securityBootstrap is Map<String, dynamic>) {
+        _unlockVerifier = securityBootstrap['verifier'] as String?;
+      }
+      if (!widget.requireSecuritySetup) {
+        _securityReady = true;
+      } else {
+        await WidgetsBinding.instance.endOfFrame;
+        if (!mounted) return;
+        await _unlockApplication();
+        if (!_securityReady) return;
+      }
       await _profileStore.load();
+      await _identityStore.load();
       await _restoreWorkspace();
       setState(() {});
     } catch (e) {
@@ -257,7 +295,19 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     return _appConfigStore.save(<String, Object?>{
       'terminal': _settings.toJson(),
       'security': _securityConfig.toJson(),
+      'connectionGroups': _connectionGroups,
+      'securityBootstrap': <String, Object?>{'verifier': _unlockVerifier},
     });
+  }
+
+  List<String> get _allConnectionGroups {
+    final groups = <String>{
+      ..._connectionGroups,
+      ..._profileStore.profiles
+          .map((profile) => profile.folder)
+          .whereType<String>(),
+    }.where((group) => group.trim().isNotEmpty).toList()..sort();
+    return groups;
   }
 
   Future<void> _applyWindowOpacity(double opacity) async {
@@ -266,6 +316,174 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     } on MissingPluginException {
       // Tests and unsupported platforms do not expose a native window channel.
     }
+  }
+
+  Future<void> _unlockApplication() async {
+    if (_unlockVerifier == null) {
+      await _setInitialPassword();
+      return;
+    }
+    while (mounted && !_securityReady) {
+      var password = '';
+      String? errorText;
+      await showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => PopScope(
+          canPop: false,
+          child: StatefulBuilder(
+            builder: (context, setDialogState) => AlertDialog(
+              title: const Text('解锁 WindSend'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('请输入应用主密码后加载连接与认证身份。'),
+                    const SizedBox(height: 16),
+                    TextField(
+                      autofocus: true,
+                      obscureText: true,
+                      onChanged: (value) => password = value,
+                      decoration: InputDecoration(
+                        labelText: '主密码',
+                        errorText: errorText,
+                      ),
+                      onSubmitted: (_) {
+                        _verifyUnlockPassword(
+                          password,
+                          setDialogState: setDialogState,
+                          setError: (value) => errorText = value,
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                FilledButton(
+                  onPressed: () {
+                    _verifyUnlockPassword(
+                      password,
+                      setDialogState: setDialogState,
+                      setError: (value) => errorText = value,
+                    );
+                  },
+                  child: const Text('解锁'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+  }
+
+  void _verifyUnlockPassword(
+    String password, {
+    required StateSetter setDialogState,
+    required ValueChanged<String?> setError,
+  }) {
+    if (password.isEmpty) {
+      setDialogState(() => setError('请输入主密码'));
+      return;
+    }
+    try {
+      final marker = _core.decryptCredential(_unlockVerifier!, password);
+      if (marker != 'wind-send-unlock-v1') {
+        throw StateError('invalid marker');
+      }
+      _masterPassword = password;
+      _securityReady = true;
+      Navigator.of(context).pop();
+    } on Object {
+      setDialogState(() => setError('密码错误'));
+    }
+  }
+
+  Future<void> _setInitialPassword() async {
+    var password = '';
+    var confirmation = '';
+    String? errorText;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: StatefulBuilder(
+          builder: (context, setDialogState) => AlertDialog(
+            title: const Text('初始化安全存储'),
+            content: SizedBox(
+              width: 460,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '首次启动需要设置应用主密码。敏感凭据将保存到'
+                    '${Platform.isMacOS
+                        ? ' macOS 钥匙串'
+                        : Platform.isWindows
+                        ? ' Windows 凭据管理器'
+                        : ' Linux Secret Service'}，'
+                    '配置文件只保留不可用的引用 ID。',
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    autofocus: true,
+                    obscureText: true,
+                    onChanged: (value) => password = value,
+                    decoration: InputDecoration(
+                      labelText: '主密码（至少 8 位）',
+                      errorText: errorText,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    obscureText: true,
+                    onChanged: (value) => confirmation = value,
+                    decoration: const InputDecoration(labelText: '确认主密码'),
+                  ),
+                  const SizedBox(height: 12),
+                  const Text(
+                    '主密码不会以明文保存。忘记主密码后无法在应用内恢复。',
+                    style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () async {
+                  if (password.length < 8) {
+                    setDialogState(() => errorText = '主密码至少需要 8 位');
+                    return;
+                  }
+                  if (password != confirmation) {
+                    setDialogState(() => errorText = '两次输入的密码不一致');
+                    return;
+                  }
+                  _masterPassword = password;
+                  _unlockVerifier = _core.encryptCredential(
+                    'wind-send-unlock-v1',
+                    password,
+                  );
+                  _securityConfig = _securityConfig.copyWith(
+                    credentialStorage: CredentialStorage.platform,
+                    masterPasswordEnabled: true,
+                  );
+                  _securityReady = true;
+                  await _saveAppConfig();
+                  if (context.mounted) Navigator.of(context).pop();
+                },
+                child: const Text('创建并进入'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _checkForUpdates({required bool silent}) async {
@@ -530,9 +748,21 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
   }
 
   void _onActiveSessionChanged(int activeIndex) {
+    _sftpSession?.close();
+    _sftpSession = null;
+    _showSftp = false;
     setState(() {
       _snapshot = _sessionManager.activeSession?.snapshot;
     });
+    if (_sessionManager.activeSession?.type == SessionType.ssh) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted &&
+            !_showConnectionHub &&
+            _sessionManager.activeSession?.type == SessionType.ssh) {
+          _openSftpForActiveSession(showError: false);
+        }
+      });
+    }
     if (!_restoringWorkspace) {
       unawaited(
         _workspaceStore.save(
@@ -554,6 +784,9 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     showDialog(
       context: context,
       builder: (context) => SessionEditor(
+        identities: _identityStore.identities,
+        onLoadIdentity: _loadIdentitySecret,
+        onManageIdentities: _openIdentityManager,
         onConnect: (config) {
           Navigator.of(context).pop();
           _connect(config);
@@ -562,40 +795,8 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
-  void _openProtocolSessionEditor() {
-    showDialog<void>(
-      context: context,
-      builder: (context) => ProtocolSessionEditor(
-        serialPorts: _core.serialListPorts(),
-        onTelnet: (config) {
-          Navigator.of(context).pop();
-          _sessionManager.addTelnetSession(
-            name: 'Telnet ${config.host}:${config.port}',
-            config: config,
-          );
-          _afterProtocolConnected();
-        },
-        onRawTcp: (config) {
-          Navigator.of(context).pop();
-          _sessionManager.addRawTcpSession(
-            name: 'TCP ${config.host}:${config.port}',
-            config: config,
-          );
-          _afterProtocolConnected();
-        },
-        onSerial: (config) {
-          Navigator.of(context).pop();
-          _sessionManager.addSerialSession(
-            name: 'Serial ${config.port}',
-            config: config,
-          );
-          _afterProtocolConnected();
-        },
-      ),
-    );
-  }
-
   void _afterProtocolConnected() {
+    setState(() => _showConnectionHub = false);
     _sessionManager.startPolling();
     _focusNode.requestFocus();
     if (_lastCols > 0 && _lastRows > 0) {
@@ -603,7 +804,11 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     }
   }
 
-  Future<void> _connect(SshConfig config, {SessionProfile? profile}) async {
+  Future<void> _connect(
+    SshConfig config, {
+    SessionProfile? profile,
+    NetworkConfig? networkConfig,
+  }) async {
     if (config.rememberCredential &&
         _securityConfig.credentialStorage == CredentialStorage.vault &&
         await _ensureMasterPassword() == null) {
@@ -617,10 +822,15 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       final openResult =
           await _openSessionIsolate(
             RustCore.libraryCandidates(),
-            jsonEncode(config.toJson(network: _networkConfig.toJson())),
+            jsonEncode(
+              config.toJson(
+                network: (networkConfig ?? _networkConfig).toJson(),
+              ),
+            ),
           ).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () => throw TimeoutException('连接超时 (15秒)'),
+            Duration(milliseconds: config.connectTimeoutMs + 1000),
+            onTimeout: () =>
+                throw TimeoutException('连接超时 (${config.connectTimeoutMs}毫秒)'),
           );
       final sessionId = openResult.$1;
 
@@ -648,7 +858,11 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
           if (accepted == true) {
             setState(() => _connecting = false);
             config.acceptUnknownHost = true;
-            await _connect(config, profile: profile);
+            await _connect(
+              config,
+              profile: profile,
+              networkConfig: networkConfig,
+            );
             return;
           }
         }
@@ -698,9 +912,10 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
           'logPath': profile?.logPath,
           'quickCommands': profile?.quickCommands ?? const <String>[],
           'tabColor': profile?.tabColor,
-          'autoReconnect': _networkConfig.reconnect.enabled,
+          'autoReconnect': (networkConfig ?? _networkConfig).reconnect.enabled,
         },
       );
+      _sessionManager.setActiveSession(_sessionManager.sessions.length - 1);
       unawaited(
         _auditLogger.write(
           action: 'session_connected',
@@ -711,6 +926,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       );
 
       setState(() => _connecting = false);
+      setState(() => _showConnectionHub = false);
 
       // 启动轮询
       _sessionManager.startPolling();
@@ -721,6 +937,24 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       // 连接成功后发送初始终端大小（如果 LayoutBuilder 已经触发过）
       if (_lastCols > 0 && _lastRows > 0) {
         _sessionManager.resize(_lastCols, _lastRows);
+      }
+      if (profile != null) {
+        final options = profile.sshOptions;
+        final defaultPath = options['defaultPath'] as String?;
+        final initialCommand = options['initialCommand'] as String?;
+        final commands = <String>[];
+        if (defaultPath != null &&
+            defaultPath.trim().isNotEmpty &&
+            defaultPath.trim() != '~') {
+          final escaped = defaultPath.trim().replaceAll("'", "'\\''");
+          commands.add("cd -- '$escaped'");
+        }
+        if (initialCommand != null && initialCommand.trim().isNotEmpty) {
+          commands.add(initialCommand.trim());
+        }
+        if (commands.isNotEmpty) {
+          _sessionManager.writeInput('${commands.join('\n')}\n');
+        }
       }
     } catch (e) {
       unawaited(
@@ -745,16 +979,16 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
 
   Future<String?> _ensureMasterPassword() async {
     if (_masterPassword?.isNotEmpty == true) return _masterPassword;
-    final controller = TextEditingController();
+    var enteredPassword = '';
     final password = await showDialog<String>(
       context: context,
       barrierDismissible: false,
       builder: (context) => AlertDialog(
         title: const Text('输入主密码'),
         content: TextField(
-          controller: controller,
           obscureText: true,
           autofocus: true,
+          onChanged: (value) => enteredPassword = value,
           decoration: const InputDecoration(labelText: '主密码'),
         ),
         actions: [
@@ -764,21 +998,17 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
           ),
           FilledButton(
             onPressed: () {
-              final value = controller.text;
-              if (value.isNotEmpty) Navigator.of(context).pop(value);
+              if (enteredPassword.isNotEmpty) {
+                Navigator.of(context).pop(enteredPassword);
+              }
             },
             child: const Text('解锁'),
           ),
         ],
       ),
     );
-    controller.dispose();
     if (password != null) _masterPassword = password;
     return password;
-  }
-
-  void _disconnect() {
-    _closeSessionAt(_sessionManager.activeSessionIndex);
   }
 
   void _closeSessionAt(int index) {
@@ -804,12 +1034,17 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
       );
     }
     _sessionManager.removeSession(index);
+    if (_sessionManager.sessions.isEmpty) {
+      setState(() => _showConnectionHub = true);
+    }
   }
 
   void _addLocalShell() {
     _sessionManager.addLocalShellSession(
       name: '本地 Shell ${_sessionManager.sessions.length + 1}',
     );
+    _sessionManager.setActiveSession(_sessionManager.sessions.length - 1);
+    setState(() => _showConnectionHub = false);
     _sessionManager.startPolling();
     _focusNode.requestFocus();
   }
@@ -853,39 +1088,26 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     });
   }
 
-  void _toggleSftp() {
-    if (_showSftp) {
+  bool _openSftpForActiveSession({bool showError = true}) {
+    final active = _sessionManager.activeSession;
+    if (active?.type != SessionType.ssh) return false;
+    try {
+      final sftp = _core.openSftp(active!.id);
       setState(() {
-        _showSftp = false;
-        _sftpSession?.close();
-        _sftpSession = null;
+        _sftpSession = sftp;
+        _showSftp = true;
       });
-    } else {
-      // 打开 SFTP 面板（需要已连接的 SSH 会话）
-      if (_sessionManager.activeSession?.type == SessionType.ssh) {
-        try {
-          final sftp = _core.openSftp(_sessionManager.activeSession!.id);
-          setState(() {
-            _sftpSession = sftp;
-            _showSftp = true;
-          });
-        } catch (e) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('打开 SFTP 失败: $e'),
-              backgroundColor: Colors.redAccent,
-            ),
-          );
-        }
-      } else {
+    } catch (error) {
+      if (showError && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('请先连接 SSH 会话'),
-            backgroundColor: Colors.orangeAccent,
+          SnackBar(
+            content: Text('打开 SFTP 失败: $error'),
+            backgroundColor: Colors.redAccent,
           ),
         );
       }
     }
+    return true;
   }
 
   void _openCommandPalette() {
@@ -948,56 +1170,270 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
-  void _saveSessionAsProfile(SessionInfo session) {
-    final config = session.profileConfig ?? const <String, Object?>{};
-    final profile = SessionProfile(
-      id: 'profile-${DateTime.now().microsecondsSinceEpoch}',
-      name: session.name,
-      type: session.type == SessionType.ssh
-          ? SessionProfileType.ssh
-          : SessionProfileType.localShell,
-      host: config['host'] as String?,
-      port: config['port'] as int?,
-      username: config['username'] as String?,
-      authType: config['authType'] == SshAuthentication.privateKey.name
-          ? SshAuthType.privateKey
-          : SshAuthType.password,
-      privateKeyPath: config['privateKeyPath'] as String?,
-      credentialId: config['credentialId'] as String?,
-      credentialStorage: config['credentialStorage'] as String?,
-      shell: config['shell'] as String?,
-      workingDir: config['workingDir'] as String?,
-      logging: config['logging'] == true,
-      logPath: config['logPath'] as String?,
-      quickCommands: List<String>.from(
-        config['quickCommands'] as List<dynamic>? ?? const [],
+  Future<AuthIdentitySecret?> _loadIdentitySecret(AuthIdentity identity) async {
+    try {
+      final storage = CredentialStorage.values.firstWhere(
+        (value) => value.name == identity.credentialStorage,
+        orElse: () => CredentialStorage.platform,
+      );
+      final value = await _credentialStore.load(
+        storage: storage,
+        credentialId: identity.secretId,
+        masterPassword: _masterPassword,
+      );
+      return value == null ? null : AuthIdentitySecret.decode(value);
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('读取认证身份失败: $error')));
+      }
+      return null;
+    }
+  }
+
+  Future<void> _openIdentityManager() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AuthIdentityManager(
+          identities: _identityStore.identities,
+          onCreate: () {
+            _openIdentityEditor(onChanged: () => setDialogState(() {}));
+          },
+          onEdit: (identity) {
+            _openIdentityEditor(
+              identity: identity,
+              onChanged: () => setDialogState(() {}),
+            );
+          },
+          onDelete: (identity) {
+            unawaited(
+              _deleteIdentity(identity, onChanged: () => setDialogState(() {})),
+            );
+          },
+        ),
       ),
-      tabColor: config['tabColor'] as String?,
     );
-    _profileStore.add(profile);
+    if (mounted) setState(() {});
+  }
+
+  void _openIdentityEditor({
+    AuthIdentity? identity,
+    required VoidCallback onChanged,
+  }) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AuthIdentityEditor(
+        identity: identity,
+        onSave:
+            ({
+              required name,
+              required username,
+              required authType,
+              required privateKeyPath,
+              required password,
+              required passphrase,
+            }) {
+              unawaited(
+                _saveIdentity(
+                  identity: identity,
+                  name: name,
+                  username: username,
+                  authType: authType,
+                  privateKeyPath: privateKeyPath,
+                  password: password,
+                  passphrase: passphrase,
+                  onChanged: onChanged,
+                  dialogContext: dialogContext,
+                ),
+              );
+            },
+      ),
+    );
+  }
+
+  Future<void> _saveIdentity({
+    required AuthIdentity? identity,
+    required String name,
+    required String username,
+    required SshAuthType authType,
+    required String privateKeyPath,
+    required String password,
+    required String passphrase,
+    required VoidCallback onChanged,
+    required BuildContext dialogContext,
+  }) async {
+    try {
+      var secret = AuthIdentitySecret(
+        password: password,
+        passphrase: passphrase,
+      );
+      if (identity != null && password.isEmpty && passphrase.isEmpty) {
+        secret =
+            await _loadIdentitySecret(identity) ?? const AuthIdentitySecret();
+      }
+      final secretId = await _credentialStore.save(
+        storage: CredentialStorage.platform,
+        secret: secret.encode(),
+      );
+      final updated = AuthIdentity(
+        id: identity?.id ?? 'identity-${DateTime.now().microsecondsSinceEpoch}',
+        name: name,
+        username: username,
+        authType: authType,
+        secretId: secretId,
+        credentialStorage: CredentialStorage.platform.name,
+        privateKeyPath: authType == SshAuthType.privateKey
+            ? privateKeyPath
+            : null,
+      );
+      _identityStore.upsert(updated);
+      await _identityStore.save();
+      if (identity != null) {
+        await _credentialStore.delete(
+          storage: CredentialStorage.values.firstWhere(
+            (value) => value.name == identity.credentialStorage,
+            orElse: () => CredentialStorage.platform,
+          ),
+          credentialId: identity.secretId,
+        );
+      }
+      onChanged();
+      if (dialogContext.mounted) Navigator.of(dialogContext).pop();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('保存认证身份失败: $error')));
+      }
+    }
+  }
+
+  Future<void> _deleteIdentity(
+    AuthIdentity identity, {
+    required VoidCallback onChanged,
+  }) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除认证身份'),
+        content: Text('确定删除“${identity.name}”及其安全存储凭据吗？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _credentialStore.delete(
+      storage: CredentialStorage.values.firstWhere(
+        (value) => value.name == identity.credentialStorage,
+        orElse: () => CredentialStorage.platform,
+      ),
+      credentialId: identity.secretId,
+    );
+    _identityStore.delete(identity.id);
+    await _identityStore.save();
+    onChanged();
+  }
+
+  Future<void> _createConnectionGroup() async {
+    var enteredName = '';
+    final group = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('新建分组'),
+        content: TextField(
+          autofocus: true,
+          onChanged: (value) => enteredName = value,
+          decoration: const InputDecoration(
+            labelText: '分组名称',
+            hintText: '例如：生产环境',
+          ),
+          onSubmitted: (value) {
+            final name = value.trim();
+            if (name.isNotEmpty) Navigator.of(context).pop(name);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final name = enteredName.trim();
+              if (name.isNotEmpty) Navigator.of(context).pop(name);
+            },
+            child: const Text('创建'),
+          ),
+        ],
+      ),
+    );
+    if (group == null || group.isEmpty) return;
+    if (!_connectionGroups.contains(group)) {
+      setState(() {
+        _connectionGroups = <String>[..._connectionGroups, group]..sort();
+      });
+      await _saveAppConfig();
+    }
+  }
+
+  void _openConnectionEditor(
+    SessionProfileType type, {
+    SessionProfile? profile,
+  }) {
+    if (type == SessionProfileType.ssh) {
+      showDialog<void>(
+        context: context,
+        builder: (context) => SshProfileEditor(
+          groups: _allConnectionGroups,
+          identities: _identityStore.identities,
+          profile: profile,
+          onTest: _testSshProfile,
+          onSave: (updated) => _saveConnectionProfile(profile, updated),
+        ),
+      );
+      return;
+    }
+    showDialog<void>(
+      context: context,
+      builder: (context) => ConnectionProfileEditor(
+        groups: _allConnectionGroups,
+        initialType: type,
+        profile: profile,
+        onSave: (updated) => _saveConnectionProfile(profile, updated),
+      ),
+    );
+  }
+
+  void _saveConnectionProfile(
+    SessionProfile? previous,
+    SessionProfile updated,
+  ) {
+    if (previous == null) {
+      _profileStore.add(updated);
+    } else {
+      _profileStore.update(previous.id, updated);
+    }
+    final group = updated.folder;
+    if (group != null && !_connectionGroups.contains(group)) {
+      _connectionGroups = <String>[..._connectionGroups, group]..sort();
+      unawaited(_saveAppConfig());
+    }
     unawaited(_profileStore.save());
-    _sessionManager.updateProfileConfig(
-      _sessionManager.activeSessionIndex,
-      <String, Object?>{...config, 'profileId': profile.id},
-    );
     setState(() {});
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(SnackBar(content: Text('会话已保存: ${session.name}')));
   }
 
   void _editProfile(SessionProfile profile) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => SessionProfileEditor(
-        profile: profile,
-        onSave: (updated) {
-          _profileStore.update(profile.id, updated);
-          unawaited(_profileStore.save());
-          setState(() {});
-        },
-      ),
-    );
+    _openConnectionEditor(profile.type, profile: profile);
   }
 
   void _duplicateProfile(SessionProfile profile) {
@@ -1053,7 +1489,7 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     final commands = List<String>.from(
       session.profileConfig?['quickCommands'] as List<dynamic>? ?? const [],
     );
-    final controller = TextEditingController();
+    var enteredCommand = '';
     final command = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1073,8 +1509,8 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
                   ),
                 ),
               TextField(
-                controller: controller,
                 autofocus: commands.isEmpty,
+                onChanged: (value) => enteredCommand = value,
                 decoration: const InputDecoration(labelText: '临时命令'),
                 onSubmitted: (value) => Navigator.of(context).pop(value.trim()),
               ),
@@ -1087,13 +1523,12 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
             child: const Text('取消'),
           ),
           FilledButton(
-            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            onPressed: () => Navigator.of(context).pop(enteredCommand.trim()),
             child: const Text('发送'),
           ),
         ],
       ),
     );
-    controller.dispose();
     if (command != null && command.isNotEmpty) {
       _sessionManager.writeInput('$command\n');
     }
@@ -1203,44 +1638,215 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     _sessionManager.setSyncInput(_syncInput);
   }
 
+  Future<(SshConfig, NetworkConfig)> _resolveSshProfile(
+    SessionProfile profile,
+  ) async {
+    var username = profile.username ?? '';
+    var authType = profile.authType ?? SshAuthType.password;
+    var password = '';
+    var passphrase = '';
+    var privateKeyPath = profile.privateKeyPath ?? '';
+
+    final identityId = profile.authIdentityId;
+    if (identityId != null) {
+      final identity = _identityStore.identities
+          .where((value) => value.id == identityId)
+          .firstOrNull;
+      if (identity == null) {
+        throw StateError('所选认证身份已不存在');
+      }
+      final secret = await _loadIdentitySecret(identity);
+      if (secret == null) throw StateError('无法读取认证身份');
+      username = identity.username;
+      authType = identity.authType;
+      password = secret.password;
+      passphrase = secret.passphrase;
+      privateKeyPath = identity.privateKeyPath ?? '';
+    } else if (profile.credentialId != null) {
+      final storage = CredentialStorage.values.firstWhere(
+        (value) => value.name == profile.credentialStorage,
+        orElse: () => CredentialStorage.none,
+      );
+      final secret =
+          await _credentialStore.load(
+            storage: storage,
+            credentialId: profile.credentialId!,
+            masterPassword: _masterPassword,
+          ) ??
+          '';
+      if (authType == SshAuthType.privateKey) {
+        passphrase = secret;
+      } else {
+        password = secret;
+      }
+    } else {
+      throw StateError('请选择认证身份，或连接时手动输入凭据');
+    }
+
+    final options = profile.sshOptions;
+    final jumpHosts = <JumpHostConfig>[];
+    for (final value in (options['jumpHosts'] as List? ?? const [])) {
+      if (value is! Map) continue;
+      final jump = Map<String, Object?>.from(value);
+      final jumpIdentityId = jump['identityId'] as String?;
+      final identity = _identityStore.identities
+          .where((candidate) => candidate.id == jumpIdentityId)
+          .firstOrNull;
+      if (identity == null) throw StateError('跳板机认证身份已不存在');
+      final secret = await _loadIdentitySecret(identity);
+      if (secret == null) throw StateError('无法读取跳板机认证身份');
+      jumpHosts.add(
+        JumpHostConfig(
+          host: jump['host'] as String? ?? '',
+          port: jump['port'] as int? ?? 22,
+          username: identity.username,
+          password: identity.authType == SshAuthType.password
+              ? secret.password
+              : secret.passphrase,
+          privateKeyPath: identity.authType == SshAuthType.privateKey
+              ? identity.privateKeyPath
+              : null,
+        ),
+      );
+    }
+
+    final disableProxy = options['disableProxy'] == true;
+    final proxyType = options['proxyType'] as String? ?? 'none';
+    ProxyConfig? proxy;
+    if (!disableProxy && proxyType != 'none') {
+      proxy = ProxyConfig(
+        type: proxyType == 'http' ? ProxyType.http : ProxyType.socks5,
+        host: options['proxyHost'] as String? ?? '',
+        port: options['proxyPort'] as int? ?? 1080,
+      );
+    } else if (!disableProxy && jumpHosts.isEmpty) {
+      proxy = _networkConfig.proxy;
+    }
+    final keepaliveMs = options['keepaliveIntervalMs'] as int? ?? 5000;
+    final network = _networkConfig.copyWith(
+      proxy: proxy,
+      clearProxy: disableProxy || (proxyType == 'none' && jumpHosts.isNotEmpty),
+      jumpHosts: jumpHosts.isEmpty ? _networkConfig.jumpHosts : jumpHosts,
+      keepalive: KeepaliveConfig(
+        enabled: keepaliveMs > 0,
+        intervalSeconds: (keepaliveMs / 1000).round().clamp(1, 3600),
+        maxMisses: _networkConfig.keepalive.maxMisses,
+      ),
+      agentForwarding: options['agentForwarding'] == true,
+    );
+    final privateKey = authType == SshAuthType.privateKey;
+    return (
+      SshConfig(
+        host: profile.host ?? '',
+        port: profile.port ?? 22,
+        username: username,
+        authentication: privateKey
+            ? SshAuthentication.privateKey
+            : SshAuthentication.password,
+        password: privateKey ? '' : password,
+        privateKeyPath: privateKeyPath,
+        passphrase: privateKey ? passphrase : '',
+        connectTimeoutMs: options['connectTimeoutMs'] as int? ?? 15000,
+        terminalType: options['terminalType'] as String? ?? 'xterm-256color',
+      ),
+      network,
+    );
+  }
+
+  Future<String?> _testSshProfile(SessionProfile profile) async {
+    try {
+      final resolved = await _resolveSshProfile(profile);
+      final result = await _openSessionIsolate(
+        RustCore.libraryCandidates(),
+        jsonEncode(resolved.$1.toJson(network: resolved.$2.toJson())),
+      ).timeout(Duration(milliseconds: resolved.$1.connectTimeoutMs + 1000));
+      if (result.$1 == 0) return result.$2 ?? '未知连接错误';
+      _core.attachSession(result.$1).close();
+      return null;
+    } on Object catch (error) {
+      return error.toString();
+    }
+  }
+
   Future<void> _connectFromProfile(SessionProfile profile) async {
     try {
       if (profile.type == SessionProfileType.ssh && profile.host != null) {
-        String secret = '';
-        final credentialId = profile.credentialId;
-        if (credentialId != null) {
-          final storage = CredentialStorage.values.firstWhere(
-            (value) => value.name == profile.credentialStorage,
-            orElse: () => CredentialStorage.none,
+        if (profile.authIdentityId != null || profile.credentialId != null) {
+          final resolved = await _resolveSshProfile(profile);
+          await _connect(
+            resolved.$1,
+            profile: profile,
+            networkConfig: resolved.$2,
           );
-          if (storage == CredentialStorage.vault &&
-              await _ensureMasterPassword() == null) {
-            return;
-          }
-          secret =
-              await _credentialStore.load(
-                storage: storage,
-                credentialId: credentialId,
-                masterPassword: _masterPassword,
-              ) ??
-              '';
+          return;
         }
-        final privateKey = profile.authType == SshAuthType.privateKey;
-        await _connect(
-          SshConfig(
-            host: profile.host!,
-            port: profile.port ?? 22,
-            username: profile.username ?? '',
-            authentication: privateKey
-                ? SshAuthentication.privateKey
-                : SshAuthentication.password,
-            password: privateKey ? '' : secret,
-            privateKeyPath: profile.privateKeyPath ?? '',
-            passphrase: privateKey ? secret : '',
-            acceptUnknownHost: false,
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (context) => SessionEditor(
+            initialConfig: SshConfig(
+              host: profile.host!,
+              port: profile.port ?? 22,
+              username: profile.username ?? '',
+              authentication: profile.authType == SshAuthType.privateKey
+                  ? SshAuthentication.privateKey
+                  : SshAuthentication.password,
+              privateKeyPath: profile.privateKeyPath ?? '',
+              connectTimeoutMs:
+                  profile.sshOptions['connectTimeoutMs'] as int? ?? 15000,
+              terminalType:
+                  profile.sshOptions['terminalType'] as String? ??
+                  'xterm-256color',
+            ),
+            identities: _identityStore.identities,
+            onLoadIdentity: _loadIdentitySecret,
+            onManageIdentities: _openIdentityManager,
+            onConnect: (config) {
+              Navigator.of(context).pop();
+              unawaited(_connect(config, profile: profile));
+            },
           ),
-          profile: profile,
         );
+        return;
+      } else if (profile.type == SessionProfileType.telnet &&
+          profile.host != null) {
+        _sessionManager.addTelnetSession(
+          name: profile.name,
+          config: TelnetConfig(host: profile.host!, port: profile.port ?? 23),
+        );
+        final index = _sessionManager.sessions.length - 1;
+        _sessionManager.updateProfileConfig(index, <String, Object?>{
+          'profileId': profile.id,
+          'host': profile.host,
+          'port': profile.port ?? 23,
+          'username': profile.username,
+          'tabColor': profile.tabColor,
+        });
+        _sessionManager.setActiveSession(index);
+        _afterProtocolConnected();
+      } else if (profile.type == SessionProfileType.rdp ||
+          profile.type == SessionProfileType.vnc ||
+          profile.type == SessionProfileType.tunnel) {
+        final type = switch (profile.type) {
+          SessionProfileType.rdp => SessionType.rdp,
+          SessionProfileType.vnc => SessionType.vnc,
+          SessionProfileType.tunnel => SessionType.tunnel,
+          _ => throw StateError('Unsupported virtual session type'),
+        };
+        _sessionManager.addVirtualSession(
+          name: profile.name,
+          type: type,
+          profileConfig: <String, Object?>{
+            'profileId': profile.id,
+            'host': profile.host,
+            'port': profile.port,
+            'username': profile.username,
+            'targetHost': profile.targetHost,
+            'targetPort': profile.targetPort,
+            'tabColor': profile.tabColor,
+          },
+        );
+        setState(() => _showConnectionHub = false);
       } else if (profile.type == SessionProfileType.localShell) {
         _sessionManager.addLocalShellSession(
           name: profile.name,
@@ -1289,6 +1895,21 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
             Text('正在连接...', style: TextStyle(color: Color(0xff8e98a8))),
           ],
         ),
+      );
+    }
+    if (session != null &&
+        (session.type == SessionType.rdp ||
+            session.type == SessionType.vnc ||
+            session.type == SessionType.tunnel)) {
+      return _ConfiguredProtocolPane(
+        session: session,
+        onEdit: () {
+          final profileId = session.profileConfig?['profileId'] as String?;
+          final profile = profileId == null
+              ? null
+              : _profileStore.get(profileId);
+          if (profile != null) _editProfile(profile);
+        },
       );
     }
     Widget terminal = TerminalView(
@@ -1350,344 +1971,124 @@ class _ShellWorkspaceState extends State<ShellWorkspace> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Row(
-        children: <Widget>[
-          _SessionRail(
-            sessions: _sessionManager.sessions,
-            activeSessionIndex: _sessionManager.activeSessionIndex,
-            savedProfiles: _profileStore.profiles,
-            onNewSession: _openSessionEditor,
-            onNewProtocol: _openProtocolSessionEditor,
-            onNewLocalShell: _addLocalShell,
-            onDisconnect: _disconnect,
-            onSaveProfile: () {
-              final session = _sessionManager.activeSession;
-              if (session != null &&
-                  (session.type == SessionType.ssh ||
-                      session.type == SessionType.localShell)) {
-                _saveSessionAsProfile(session);
-              }
-            },
-            onSessionSelected: (index) {
-              _sessionManager.setActiveSession(index);
-              _focusNode.requestFocus();
-            },
-            onProfileTap: _connectFromProfile,
-            onProfileEdit: _editProfile,
-            onProfileDuplicate: _duplicateProfile,
-            onProfileDelete: (profile) {
-              unawaited(_deleteProfile(profile));
-            },
-            onSettings: _openSettings,
-            onNetworkSettings: _openNetworkSettings,
-            onSecuritySettings: _openSecuritySettings,
-            onSftp: _toggleSftp,
-            connecting: _connecting,
-            showSftp: _showSftp,
+  Widget _buildSessionWorkspace() {
+    return Column(
+      children: <Widget>[
+        _TopBar(
+          core: _core,
+          session: _sessionManager.activeSession,
+          connecting: _connecting,
+          onSearch: _toggleSearch,
+          onQuickCommands: _sessionManager.activeSession == null
+              ? null
+              : _openQuickCommands,
+          onPortForwardStatus:
+              _sessionManager.activeSession?.type == SessionType.ssh
+              ? _showPortForwardStatus
+              : null,
+          splitPane: _splitPane,
+          syncInput: _syncInput,
+          onToggleSplit: _sessionManager.sessions.length < 2
+              ? null
+              : () => setState(() => _splitPane = !_splitPane),
+          onToggleSyncInput: _sessionManager.sessions.length < 2
+              ? null
+              : () => unawaited(_toggleSyncInput()),
+        ),
+        if (_showSearch)
+          TerminalSearchBar(
+            snapshot: _snapshot,
+            onSearchResult: _onSearchResult,
+            onClose: _closeSearch,
           ),
-          Expanded(
-            child: Column(
-              children: <Widget>[
-                _TabBar(
-                  sessions: _sessionManager.sessions,
-                  activeIndex: _sessionManager.activeSessionIndex,
-                  onTabSelected: (index) {
-                    _sessionManager.setActiveSession(index);
-                    _focusNode.requestFocus();
-                  },
-                  onTabClosed: (index) {
-                    _closeSessionAt(index);
-                  },
+        Expanded(
+          child: Row(
+            children: [
+              if (_showSftp && _sftpSession != null)
+                SizedBox(
+                  width: 380,
+                  child: SftpPanel(sftpSession: _sftpSession),
                 ),
-                _TopBar(
-                  core: _core,
-                  session: _sessionManager.activeSession,
-                  connecting: _connecting,
-                  onSearch: _toggleSearch,
-                  onQuickCommands: _sessionManager.activeSession == null
-                      ? null
-                      : _openQuickCommands,
-                  onPortForwardStatus:
-                      _sessionManager.activeSession?.type == SessionType.ssh
-                      ? _showPortForwardStatus
-                      : null,
-                  splitPane: _splitPane,
-                  syncInput: _syncInput,
-                  onToggleSplit: _sessionManager.sessions.length < 2
-                      ? null
-                      : () => setState(() => _splitPane = !_splitPane),
-                  onToggleSyncInput: _sessionManager.sessions.length < 2
-                      ? null
-                      : () => unawaited(_toggleSyncInput()),
-                ),
-                if (_showSearch)
-                  TerminalSearchBar(
-                    snapshot: _snapshot,
-                    onSearchResult: _onSearchResult,
-                    onClose: _closeSearch,
-                  ),
-                Expanded(
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Padding(
-                          padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-                          child: _splitPane && _secondarySession != null
-                              ? Row(
-                                  children: [
-                                    Expanded(
-                                      child: _buildTerminalPane(
-                                        _sessionManager.activeSession,
-                                        interactive: true,
-                                      ),
-                                    ),
-                                    const VerticalDivider(width: 1),
-                                    Expanded(
-                                      child: _buildTerminalPane(
-                                        _secondarySession,
-                                        interactive: false,
-                                      ),
-                                    ),
-                                  ],
-                                )
-                              : _buildTerminalPane(
-                                  _sessionManager.activeSession,
-                                  interactive: true,
-                                ),
-                        ),
-                      ),
-                      if (_showSftp && _sftpSession != null)
-                        SizedBox(
-                          width: 520,
-                          child: SftpPanel(sftpSession: _sftpSession),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SessionRail extends StatelessWidget {
-  final List<SessionInfo> sessions;
-  final int activeSessionIndex;
-  final List<SessionProfile> savedProfiles;
-  final VoidCallback onNewSession;
-  final VoidCallback onNewProtocol;
-  final VoidCallback onNewLocalShell;
-  final VoidCallback onDisconnect;
-  final VoidCallback onSaveProfile;
-  final void Function(int index) onSessionSelected;
-  final void Function(SessionProfile profile) onProfileTap;
-  final void Function(SessionProfile profile) onProfileEdit;
-  final void Function(SessionProfile profile) onProfileDuplicate;
-  final void Function(SessionProfile profile) onProfileDelete;
-  final VoidCallback onSettings;
-  final VoidCallback onNetworkSettings;
-  final VoidCallback onSecuritySettings;
-  final VoidCallback onSftp;
-  final bool connecting;
-  final bool showSftp;
-
-  const _SessionRail({
-    required this.sessions,
-    required this.activeSessionIndex,
-    required this.savedProfiles,
-    required this.onNewSession,
-    required this.onNewProtocol,
-    required this.onNewLocalShell,
-    required this.onDisconnect,
-    required this.onSaveProfile,
-    required this.onSessionSelected,
-    required this.onProfileTap,
-    required this.onProfileEdit,
-    required this.onProfileDuplicate,
-    required this.onProfileDelete,
-    required this.onSettings,
-    required this.onNetworkSettings,
-    required this.onSecuritySettings,
-    required this.onSftp,
-    this.connecting = false,
-    this.showSftp = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 248,
-      decoration: const BoxDecoration(
-        color: Color(0xff191d25),
-        border: Border(right: BorderSide(color: Color(0xff2a303b))),
-      ),
-      child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            const Padding(
-              padding: EdgeInsets.fromLTRB(18, 18, 18, 12),
-              child: Text(
-                'WindSend',
-                style: TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
-              ),
-            ),
-            _NavItem(
-              icon: Icons.add_rounded,
-              label: connecting ? '连接中...' : '新建 SSH 连接',
-              selected: false,
-              onTap: connecting ? () {} : onNewSession,
-            ),
-            _NavItem(
-              icon: Icons.terminal_rounded,
-              label: '新建本地 Shell',
-              selected: false,
-              onTap: onNewLocalShell,
-            ),
-            _NavItem(
-              icon: Icons.cable_rounded,
-              label: '新建 Telnet / TCP / Serial',
-              selected: false,
-              onTap: onNewProtocol,
-            ),
-            if (sessions.isNotEmpty) ...[
-              const Divider(color: Color(0xff2a303b), height: 28),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 18),
-                child: Text(
-                  '活动会话 (${sessions.length})',
-                  style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
-                ),
-              ),
-              ...sessions.asMap().entries.map((entry) {
-                final index = entry.key;
-                final session = entry.value;
-                final isActive = index == activeSessionIndex;
-                final icon = session.type == SessionType.ssh
-                    ? Icons.cloud_rounded
-                    : Icons.terminal_rounded;
-                return _NavItem(
-                  icon: icon,
-                  label: session.name,
-                  selected: isActive,
-                  onTap: () => onSessionSelected(index),
-                );
-              }),
-              if (activeSessionIndex >= 0)
-                _NavItem(
-                  icon: Icons.bookmark_add_rounded,
-                  label: '保存当前会话',
-                  selected: false,
-                  onTap: onSaveProfile,
-                ),
-              if (activeSessionIndex >= 0)
-                _NavItem(
-                  icon: Icons.close_rounded,
-                  label: '关闭当前会话',
-                  selected: false,
-                  onTap: onDisconnect,
-                ),
-            ],
-            if (savedProfiles.isNotEmpty) ...[
-              const Divider(color: Color(0xff2a303b), height: 28),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 18),
-                child: Text(
-                  '已保存会话 (${savedProfiles.length})',
-                  style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
-                ),
-              ),
+              if (_showSftp && _sftpSession != null)
+                const VerticalDivider(width: 1, color: Color(0xff27313b)),
               Expanded(
-                child: SessionTree(
-                  profiles: savedProfiles,
-                  onSessionTap: onProfileTap,
-                  onSessionEdit: onProfileEdit,
-                  onSessionDuplicate: onProfileDuplicate,
-                  onSessionDelete: onProfileDelete,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                  child: _splitPane && _secondarySession != null
+                      ? Row(
+                          children: [
+                            Expanded(
+                              child: _buildTerminalPane(
+                                _sessionManager.activeSession,
+                                interactive: true,
+                              ),
+                            ),
+                            const VerticalDivider(width: 1),
+                            Expanded(
+                              child: _buildTerminalPane(
+                                _secondarySession,
+                                interactive: false,
+                              ),
+                            ),
+                          ],
+                        )
+                      : _buildTerminalPane(
+                          _sessionManager.activeSession,
+                          interactive: true,
+                        ),
                 ),
               ),
             ],
-            const Divider(color: Color(0xff2a303b), height: 28),
-            _NavItem(
-              icon: Icons.folder_rounded,
-              label: showSftp ? '关闭 SFTP' : 'SFTP 文件管理',
-              selected: showSftp,
-              onTap: onSftp,
-            ),
-            _NavItem(
-              icon: Icons.settings_rounded,
-              label: '终端设置',
-              selected: false,
-              onTap: onSettings,
-            ),
-            _NavItem(
-              icon: Icons.wifi_rounded,
-              label: '网络设置',
-              selected: false,
-              onTap: onNetworkSettings,
-            ),
-            _NavItem(
-              icon: Icons.security_rounded,
-              label: '安全设置',
-              selected: false,
-              onTap: onSecuritySettings,
-            ),
-            const Divider(color: Color(0xff2a303b), height: 28),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 18),
-              child: Text(
-                'Ctrl+P 命令面板',
-                style: TextStyle(color: Color(0xff4a5568), fontSize: 11),
-              ),
-            ),
-          ],
+          ),
         ),
-      ),
+      ],
     );
   }
-}
-
-class _NavItem extends StatelessWidget {
-  const _NavItem({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        height: 42,
-        margin: const EdgeInsets.symmetric(horizontal: 10),
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xff263247) : Colors.transparent,
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Row(
-          children: <Widget>[
-            Icon(icon, size: 18, color: const Color(0xff8fb6ff)),
-            const SizedBox(width: 10),
+    if (!_securityReady) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+    return Scaffold(
+      body: SafeArea(
+        child: Column(
+          children: [
+            _TabBar(
+              sessions: _sessionManager.sessions,
+              activeIndex: _sessionManager.activeSessionIndex,
+              homeSelected: _showConnectionHub,
+              onHomeSelected: () => setState(() => _showConnectionHub = true),
+              onTabSelected: (index) {
+                setState(() => _showConnectionHub = false);
+                _sessionManager.setActiveSession(index);
+                _focusNode.requestFocus();
+              },
+              onTabClosed: _closeSessionAt,
+            ),
             Expanded(
-              child: Text(
-                label,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontWeight: FontWeight.w600),
-              ),
+              child: _showConnectionHub
+                  ? ConnectionHub(
+                      profiles: _profileStore.profiles,
+                      groups: _allConnectionGroups,
+                      onOpen: (profile) {
+                        unawaited(_connectFromProfile(profile));
+                      },
+                      onCreate: (type) => _openConnectionEditor(type),
+                      onEdit: _editProfile,
+                      onDuplicate: _duplicateProfile,
+                      onDelete: (profile) {
+                        unawaited(_deleteProfile(profile));
+                      },
+                      onCreateGroup: () {
+                        unawaited(_createConnectionGroup());
+                      },
+                      onManageIdentities: _openIdentityManager,
+                      onSettings: _openSettings,
+                      onNetworkSettings: _openNetworkSettings,
+                      onSecuritySettings: _openSecuritySettings,
+                    )
+                  : _buildSessionWorkspace(),
             ),
           ],
         ),
@@ -1699,85 +2100,50 @@ class _NavItem extends StatelessWidget {
 class _TabBar extends StatelessWidget {
   final List<SessionInfo> sessions;
   final int activeIndex;
+  final bool homeSelected;
+  final VoidCallback onHomeSelected;
   final void Function(int index) onTabSelected;
   final void Function(int index) onTabClosed;
 
   const _TabBar({
     required this.sessions,
     required this.activeIndex,
+    required this.homeSelected,
+    required this.onHomeSelected,
     required this.onTabSelected,
     required this.onTabClosed,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (sessions.isEmpty) {
-      return const SizedBox.shrink();
-    }
-
     return Container(
-      height: 36,
+      height: 42,
       decoration: const BoxDecoration(
         color: Color(0xff191d25),
         border: Border(bottom: BorderSide(color: Color(0xff2a303b))),
       ),
-      child: ListView.builder(
+      child: ListView(
         scrollDirection: Axis.horizontal,
-        itemCount: sessions.length,
-        itemBuilder: (context, index) {
-          final session = sessions[index];
-          final isActive = index == activeIndex;
-          final icon = session.type == SessionType.ssh
-              ? Icons.cloud_rounded
-              : Icons.terminal_rounded;
-          final tabColor = _tabColor(session.profileConfig?['tabColor']);
-
-          return GestureDetector(
-            onTap: () => onTabSelected(index),
-            child: Container(
-              constraints: const BoxConstraints(minWidth: 120, maxWidth: 200),
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                color: isActive ? const Color(0xff263247) : Colors.transparent,
-                border: Border(
-                  top: BorderSide(
-                    color: tabColor ?? Colors.transparent,
-                    width: 2,
-                  ),
-                  right: BorderSide(color: const Color(0xff2a303b)),
-                ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(icon, size: 14, color: const Color(0xff8fb6ff)),
-                  const SizedBox(width: 6),
-                  Flexible(
-                    child: Text(
-                      session.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: isActive
-                            ? const Color(0xffd7e0ee)
-                            : const Color(0xff8e98a8),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  GestureDetector(
-                    onTap: () => onTabClosed(index),
-                    child: Icon(
-                      Icons.close_rounded,
-                      size: 14,
-                      color: const Color(0xff8e98a8),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
+        children: [
+          _WorkspaceTab(
+            label: '连接中心',
+            icon: Icons.hub_outlined,
+            selected: homeSelected,
+            onTap: onHomeSelected,
+          ),
+          ...sessions.asMap().entries.map((entry) {
+            final index = entry.key;
+            final session = entry.value;
+            return _WorkspaceTab(
+              label: session.name,
+              icon: _sessionTypeIcon(session.type),
+              selected: !homeSelected && index == activeIndex,
+              accentColor: _tabColor(session.profileConfig?['tabColor']),
+              onTap: () => onTabSelected(index),
+              onClose: () => onTabClosed(index),
+            );
+          }),
+        ],
       ),
     );
   }
@@ -1791,6 +2157,172 @@ class _TabBar extends StatelessWidget {
       'purple' => const Color(0xffad7fa8),
       _ => null,
     };
+  }
+}
+
+IconData _sessionTypeIcon(SessionType type) {
+  return switch (type) {
+    SessionType.ssh => Icons.terminal_rounded,
+    SessionType.rdp => Icons.desktop_windows_outlined,
+    SessionType.telnet => Icons.settings_ethernet_rounded,
+    SessionType.tunnel => Icons.route_outlined,
+    SessionType.vnc => Icons.monitor_outlined,
+    SessionType.localShell => Icons.code_rounded,
+    SessionType.rawTcp => Icons.cable_rounded,
+    SessionType.serial => Icons.usb_rounded,
+  };
+}
+
+class _WorkspaceTab extends StatelessWidget {
+  const _WorkspaceTab({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+    this.onClose,
+    this.accentColor,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onClose;
+  final Color? accentColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        constraints: const BoxConstraints(minWidth: 132, maxWidth: 220),
+        padding: const EdgeInsets.symmetric(horizontal: 13),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xff263247) : Colors.transparent,
+          border: Border(
+            top: BorderSide(
+              color:
+                  accentColor ??
+                  (selected ? const Color(0xff72c991) : Colors.transparent),
+              width: 2,
+            ),
+            right: const BorderSide(color: Color(0xff2a303b)),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 15, color: const Color(0xff8fb6ff)),
+            const SizedBox(width: 7),
+            Flexible(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: selected
+                      ? const Color(0xffd7e0ee)
+                      : const Color(0xff8e98a8),
+                ),
+              ),
+            ),
+            if (onClose != null) ...[
+              const SizedBox(width: 7),
+              InkWell(
+                onTap: onClose,
+                child: const Icon(
+                  Icons.close_rounded,
+                  size: 14,
+                  color: Color(0xff8e98a8),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ConfiguredProtocolPane extends StatelessWidget {
+  const _ConfiguredProtocolPane({required this.session, required this.onEdit});
+
+  final SessionInfo session;
+  final VoidCallback onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final config = session.profileConfig ?? const <String, Object?>{};
+    final host = config['host'] as String?;
+    final port = config['port'] as int?;
+    final targetHost = config['targetHost'] as String?;
+    final targetPort = config['targetPort'] as int?;
+    final protocol = switch (session.type) {
+      SessionType.rdp => 'RDP',
+      SessionType.vnc => 'VNC',
+      SessionType.tunnel => 'SSH 隧道',
+      _ => session.type.name.toUpperCase(),
+    };
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 620),
+        child: Card(
+          margin: const EdgeInsets.all(32),
+          child: Padding(
+            padding: const EdgeInsets.all(28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      _sessionTypeIcon(session.type),
+                      size: 32,
+                      color: const Color(0xff72c991),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            session.name,
+                            style: const TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          Text(
+                            '$protocol · ${host ?? '-'}:${port ?? '-'}',
+                            style: const TextStyle(color: Color(0xff9aa7b5)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                if (targetHost != null) ...[
+                  const SizedBox(height: 18),
+                  Text('目标地址：$targetHost:${targetPort ?? '-'}'),
+                ],
+                const SizedBox(height: 22),
+                const Text(
+                  '连接配置已经保存并作为独立标签打开。当前版本尚未接入该协议的传输与画面渲染核心，因此不会伪装为已连接状态。',
+                  style: TextStyle(height: 1.5, color: Color(0xffb7c0cc)),
+                ),
+                const SizedBox(height: 22),
+                FilledButton.icon(
+                  onPressed: onEdit,
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('编辑连接配置'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

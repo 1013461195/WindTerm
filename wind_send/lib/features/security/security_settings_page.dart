@@ -136,52 +136,14 @@ class _SecuritySettingsPageState extends State<SecuritySettingsPage> {
   }
 
   Widget _buildCredentialStorageSettings() {
-    return Column(
-      children: [
-        DropdownButtonFormField<CredentialStorage>(
-          initialValue: _config.credentialStorage,
-          dropdownColor: const Color(0xff191d25),
-          style: const TextStyle(color: Color(0xffd7e0ee)),
-          decoration: const InputDecoration(
-            labelText: '存储方式',
-            labelStyle: TextStyle(color: Color(0xff8e98a8)),
-          ),
-          items: const [
-            DropdownMenuItem(value: CredentialStorage.none, child: Text('不保存')),
-            DropdownMenuItem(
-              value: CredentialStorage.platform,
-              child: Text('平台 Keychain'),
-            ),
-            DropdownMenuItem(
-              value: CredentialStorage.vault,
-              child: Text('主密码加密'),
-            ),
-          ],
-          onChanged: (value) {
-            if (value != null) {
-              _updateConfig(_config.copyWith(credentialStorage: value));
-            }
-          },
-        ),
-        if (_config.credentialStorage == CredentialStorage.vault) ...[
-          const SizedBox(height: 8),
-          SwitchListTile(
-            title: const Text(
-              '启用主密码',
-              style: TextStyle(color: Color(0xffd7e0ee)),
-            ),
-            subtitle: const Text(
-              '使用主密码加密所有凭据',
-              style: TextStyle(color: Color(0xff4a5568), fontSize: 12),
-            ),
-            value: _config.masterPasswordEnabled,
-            activeThumbColor: const Color(0xff2f6fed),
-            onChanged: (value) {
-              _updateConfig(_config.copyWith(masterPasswordEnabled: value));
-            },
-          ),
-        ],
-      ],
+    return const ListTile(
+      leading: Icon(Icons.lock_rounded, color: Color(0xff8ae234)),
+      title: Text('操作系统安全存储', style: TextStyle(color: Color(0xffd7e0ee))),
+      subtitle: Text(
+        'macOS 使用钥匙串，Windows 使用凭据管理器，Linux 使用 Secret Service。'
+        '应用启动时还需要主密码解锁。',
+        style: TextStyle(color: Color(0xff8e98a8), fontSize: 12),
+      ),
     );
   }
 

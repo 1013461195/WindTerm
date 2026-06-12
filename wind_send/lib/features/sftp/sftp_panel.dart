@@ -320,18 +320,19 @@ class _SftpPanelState extends State<SftpPanel> {
   }
 
   void _showChmodDialog(SftpFileInfo file) {
-    final controller = TextEditingController(
-      text: (file.permissions & 0x1ff).toRadixString(8).padLeft(3, '0'),
-    );
+    var enteredMode = (file.permissions & 0x1ff)
+        .toRadixString(8)
+        .padLeft(3, '0');
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         backgroundColor: const Color(0xff191d25),
         title: const Text('修改权限', style: TextStyle(color: Color(0xffd7e0ee))),
-        content: TextField(
-          controller: controller,
+        content: TextFormField(
+          initialValue: enteredMode,
           autofocus: true,
           maxLength: 4,
+          onChanged: (value) => enteredMode = value,
           style: const TextStyle(
             color: Color(0xffd7e0ee),
             fontFamily: 'monospace',
@@ -348,7 +349,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
           FilledButton(
             onPressed: () {
-              final value = controller.text.trim();
+              final value = enteredMode.trim();
               if (!RegExp(r'^[0-7]{3,4}$').hasMatch(value)) {
                 _showError('权限必须是 3 或 4 位八进制数字');
                 return;
@@ -364,7 +365,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
         ],
       ),
-    ).whenComplete(controller.dispose);
+    );
   }
 
   Widget _infoRow(String label, String value) {
@@ -550,12 +551,16 @@ class _SftpPanelState extends State<SftpPanel> {
     final oldName = entity.uri.pathSegments
         .where((part) => part.isNotEmpty)
         .last;
-    final controller = TextEditingController(text: oldName);
+    var enteredName = oldName;
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('重命名本地项目'),
-        content: TextField(controller: controller, autofocus: true),
+        content: TextFormField(
+          initialValue: oldName,
+          autofocus: true,
+          onChanged: (value) => enteredName = value,
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -563,7 +568,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
           FilledButton(
             onPressed: () {
-              final name = controller.text.trim();
+              final name = enteredName.trim();
               if (name.isNotEmpty) {
                 entity.renameSync('$_localPath${Platform.pathSeparator}$name');
                 Navigator.of(context).pop();
@@ -574,7 +579,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
         ],
       ),
-    ).whenComplete(controller.dispose);
+    );
   }
 
   Future<void> _deleteLocalEntity(FileSystemEntity entity) async {
@@ -605,12 +610,15 @@ class _SftpPanelState extends State<SftpPanel> {
   }
 
   void _createLocalDirectory() {
-    final controller = TextEditingController();
+    var enteredName = '';
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('新建本地目录'),
-        content: TextField(controller: controller, autofocus: true),
+        content: TextField(
+          autofocus: true,
+          onChanged: (value) => enteredName = value,
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -618,7 +626,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
           FilledButton(
             onPressed: () {
-              final name = controller.text.trim();
+              final name = enteredName.trim();
               if (name.isNotEmpty) {
                 Directory(
                   '$_localPath${Platform.pathSeparator}$name',
@@ -631,11 +639,11 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
         ],
       ),
-    ).whenComplete(controller.dispose);
+    );
   }
 
   void _showCreateFileDialog({required bool local}) {
-    final controller = TextEditingController();
+    var enteredName = '';
     showDialog<void>(
       context: context,
       builder: (context) => AlertDialog(
@@ -645,8 +653,8 @@ class _SftpPanelState extends State<SftpPanel> {
           style: const TextStyle(color: Color(0xffd7e0ee)),
         ),
         content: TextField(
-          controller: controller,
           autofocus: true,
+          onChanged: (value) => enteredName = value,
           style: const TextStyle(color: Color(0xffd7e0ee)),
           decoration: const InputDecoration(hintText: '输入文件名称'),
         ),
@@ -657,7 +665,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
           FilledButton(
             onPressed: () {
-              final name = controller.text.trim();
+              final name = enteredName.trim();
               if (name.isEmpty || name == '.' || name == '..') return;
               Navigator.pop(context);
               if (local) {
@@ -670,7 +678,7 @@ class _SftpPanelState extends State<SftpPanel> {
           ),
         ],
       ),
-    ).whenComplete(controller.dispose);
+    );
   }
 
   Future<void> _createLocalFile(String name) async {

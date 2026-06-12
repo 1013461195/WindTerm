@@ -6,7 +6,7 @@ import '../../core_bridge/rust_core.dart';
 import '../protocol/protocol_config.dart';
 
 /// 会话类型
-enum SessionType { ssh, localShell, telnet, rawTcp, serial }
+enum SessionType { ssh, rdp, telnet, tunnel, vnc, localShell, rawTcp, serial }
 
 /// 会话信息
 class SessionInfo {
@@ -235,6 +235,25 @@ class SessionManager {
     return info;
   }
 
+  SessionInfo addVirtualSession({
+    required String name,
+    required SessionType type,
+    required Map<String, Object?> profileConfig,
+  }) {
+    final info = SessionInfo(
+      id: DateTime.now().microsecondsSinceEpoch,
+      name: name,
+      type: type,
+      session: null,
+      profileConfig: profileConfig,
+      state: 'saved',
+    );
+    _sessions.add(info);
+    _notifySessionsChanged();
+    setActiveSession(_sessions.length - 1);
+    return info;
+  }
+
   /// 移除会话
   void removeSession(int index) {
     if (index < 0 || index >= _sessions.length) return;
@@ -275,6 +294,10 @@ class SessionManager {
       switch (session.type) {
         case SessionType.ssh:
           (session.session as SshSession).writeInput(data);
+        case SessionType.rdp:
+        case SessionType.tunnel:
+        case SessionType.vnc:
+          break;
         case SessionType.localShell:
           (session.session as LocalShellSession).writeInput(data);
         case SessionType.telnet:
@@ -294,6 +317,10 @@ class SessionManager {
       switch (session.type) {
         case SessionType.ssh:
           (session.session as SshSession).writeBytes(bytes);
+        case SessionType.rdp:
+        case SessionType.tunnel:
+        case SessionType.vnc:
+          break;
         case SessionType.localShell:
           (session.session as LocalShellSession).writeBytes(bytes);
         case SessionType.telnet:
@@ -328,6 +355,10 @@ class SessionManager {
           meta: meta,
           ctrl: ctrl,
         );
+      case SessionType.rdp:
+      case SessionType.tunnel:
+      case SessionType.vnc:
+        break;
       case SessionType.localShell:
         (session.session as LocalShellSession).sendMouseEvent(
           eventType: eventType,
@@ -361,6 +392,10 @@ class SessionManager {
     switch (session.type) {
       case SessionType.ssh:
         (session.session as SshSession).resize(cols, rows);
+      case SessionType.rdp:
+      case SessionType.tunnel:
+      case SessionType.vnc:
+        break;
       case SessionType.localShell:
         (session.session as LocalShellSession).resize(cols, rows);
       case SessionType.telnet:
@@ -424,6 +459,10 @@ class SessionManager {
               ssh.canReconnect()) {
             onReconnectRequired?.call(_sessions[i]);
           }
+        case SessionType.rdp:
+        case SessionType.tunnel:
+        case SessionType.vnc:
+          snapshot = null;
         case SessionType.localShell:
           snapshot = (session.session as LocalShellSession).readOutput();
         case SessionType.telnet:
@@ -468,6 +507,10 @@ class SessionManager {
     switch (session.type) {
       case SessionType.ssh:
         (session.session as SshSession).close();
+      case SessionType.rdp:
+      case SessionType.tunnel:
+      case SessionType.vnc:
+        break;
       case SessionType.localShell:
         (session.session as LocalShellSession).close();
       case SessionType.telnet:
